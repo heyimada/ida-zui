@@ -154,14 +154,22 @@ extern "C" int izs_proximity(uint64_t ea, uint32_t up, uint32_t down, uint32_t f
       {
         std::vector<ea_t> list = dir < 0 ? nodes[ni].n.callers : nodes[ni].n.callees;
         size_t shown = 0;
+        // Data and imports get a quota of their own: with plenty of
+        // functions around, they would never make the cut.
+        size_t shown_data = 0;
+        const size_t data_quota = data ? (fanout + 2) / 3 : 0;
         for ( ea_t at : list )
         {
-          if ( shown >= fanout )
-            break;
+          bool is_data = data && strcmp(kind_of(at), "data") == 0;
+          if ( is_data ? shown_data >= data_quota : shown >= fanout )
+            continue;
           bool known = index.count(at) != 0;
           if ( !known && !add(at, dir * (int)level) )
             continue;
-          shown++;
+          if ( is_data )
+            shown_data++;
+          else
+            shown++;
           if ( !known )
             next.push_back(index[at]);
         }

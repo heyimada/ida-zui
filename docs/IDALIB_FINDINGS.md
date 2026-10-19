@@ -1,6 +1,6 @@
 # idalib: what works headless
 
-All results below were verified with standalone C++ programs against an IDA Pro 9.x installation and its SDK, before the matching feature was built into the host.
+All results below were verified with standalone C++ programs against an IDA Pro installation and its SDK, before the matching feature was built into the host.
 
 ## General
 
@@ -42,7 +42,7 @@ py->eval_expr(&rv, BADADDR, "idaapi.get_func_qty()", &err);               // rv.
 ```
 
 - Capture output with an `HT_UI` listener on `ui_msg`: `fmt = va_arg(va, const char*)`, then `va_list` and `qvsnprintf`. This catches `print`, stderr and loader messages.
-- `idaapi.get_inf_structure` is gone in IDA 9.x. Use `ida_ida.inf_*` instead.
+- `idaapi.get_inf_structure` is gone in IDA 9. Use `ida_ida.inf_*` instead.
 
 ## Lumina: partial
 

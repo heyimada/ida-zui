@@ -16,6 +16,9 @@ pub struct Recent {
     pub path: String,
     /// Seconds since the Unix epoch.
     pub opened: u64,
+    /// "x86-64", "ARM", ...: what the database was when it last opened.
+    #[serde(default)]
+    pub arch: String,
 }
 
 /// Which panels are open and how big, remembered between runs.
@@ -140,6 +143,8 @@ pub struct Settings {
     pub python_history_size: usize,
     /// The script file last run from File > Script file.
     pub last_script: String,
+    /// The IDA folder picked with "Locate IDA..." (`IDADIR` overrides it).
+    pub ida_dir: Option<String>,
     /// Action name (`ida::Rename`) to keystrokes; replaces that action's defaults.
     pub keymap: BTreeMap<String, Vec<String>>,
     pub recent: Vec<Recent>,
@@ -160,6 +165,7 @@ impl Default for Settings {
             show_analysis_progress: true,
             python_history_size: crate::py_history::DEFAULT_CAP,
             last_script: String::new(),
+            ida_dir: None,
             keymap: BTreeMap::new(),
             recent: Vec::new(),
             layout: PanelLayout::default(),
@@ -214,6 +220,7 @@ impl Settings {
             Recent {
                 path: p,
                 opened: now,
+                arch: String::new(),
             },
         );
         self.recent.truncate(MAX_RECENT);
@@ -258,6 +265,7 @@ pub fn update(cx: &mut App, f: impl FnOnce(&mut Settings)) {
 /// Pushes the current settings into the theme, the font cells and the keymap.
 pub fn apply(cx: &mut App) {
     let s = get(cx).clone();
+    ida_proto::client::set_ida_dir_setting(s.ida_dir.as_ref().map(PathBuf::from));
     cx.set_global(s.theme());
     theme::set_fonts(&s.code_font, s.code_font_size, s.ui_font_size);
     crate::actions::apply_keymap(&s.keymap, cx);

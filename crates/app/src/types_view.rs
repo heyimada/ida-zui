@@ -14,7 +14,7 @@ use gpui::{
     Subscription, UniformListScrollHandle, Window, canvas, deferred, div, prelude::*, px,
     uniform_list,
 };
-use ida_proto::declerr::{DeclError, locate_in, split_declarations};
+use ida_proto::declerr::{DeclError, locate_in, split_declarations, unterminated_comment};
 use ida_proto::{
     ApplyReply, ClientError, TypeApply, TypeBrief, TypeCreate, TypeDecl, TypeDelete, TypeList,
 };
@@ -425,14 +425,20 @@ impl TypesView {
             .iter()
             .map(|e| (Some(e.line), e.message.clone().into()))
             .collect();
-        let markers: Vec<ErrorMarker> = errors
+        let mut markers: Vec<ErrorMarker> = errors
             .iter()
             .map(|e| ErrorMarker::new(e.line, e.line, e.message.clone()))
             .collect();
+        // IDA's parser says nothing about an unterminated `/*`.
+        let lint = unterminated_comment(&decl);
+        if let Some(l) = &lint {
+            markers.push(ErrorMarker::new(l.line, l.line, l.message.clone()));
+            self.messages.push((Some(l.line), l.message.clone().into()));
+        }
         // Statements without errors are stored even when others failed.
         let stored = reply.applied || !reply.names.is_empty();
+        self.editor.update(cx, |e, cx| e.set_errors(markers, cx));
         if reply.errors > 0 {
-            self.editor.update(cx, |e, cx| e.set_errors(markers, cx));
             let first = errors.first().map(|e| e.line + 1).unwrap_or(1);
             self.status = Some((
                 format!(
@@ -449,7 +455,13 @@ impl TypesView {
                 [one] => format!("Applied {one}"),
                 many => format!("Applied {} types", many.len()),
             };
-            self.status = Some((what.into(), false));
+            self.status = Some(match &lint {
+                Some(l) => (
+                    format!("{what}. Warning, line {}: {}", l.line + 1, l.message).into(),
+                    true,
+                ),
+                None => (what.into(), false),
+            });
             self.loaded = decl;
             self.importing = false;
             self.armed = None;

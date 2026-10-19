@@ -568,7 +568,10 @@ impl ListingView {
             commands::edit(&self.session, EditKind::Collapse, ea, cx);
             return;
         }
-        if let Some(token) = self.token() {
+        let token = self.rows.get(self.cursor).and_then(|r| {
+            code::follow_token_at(&r.line, self.caret_col).map(|t| r.line.text[t].to_owned())
+        });
+        if let Some(token) = token {
             commands::follow_token(&self.session, token, ea, cx);
         }
     }

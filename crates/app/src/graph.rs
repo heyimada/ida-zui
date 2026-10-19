@@ -55,6 +55,53 @@ struct Block {
     end: Ea,
     lines: Vec<(Ea, Line)>,
     succ_kinds: Vec<(usize, EdgeKind)>,
+    /// While a long block is folded: its complete lines. `lines` then holds
+    /// the head, the fold chip (at index `chip`) and the tail.
+    full: Option<Vec<(Ea, Line)>>,
+    chip: Option<usize>,
+}
+
+/// Blocks longer than this fold their middle into one "N lines" chip.
+const FOLD_OVER: usize = 40;
+/// Lines kept at each end of a folded block.
+const FOLD_KEEP: usize = 14;
+
+/// The line of `lines` that stands for the item at `ea`: its instruction
+/// line, as in the listing (a segment banner or label shares the address).
+fn locate_line(lines: &[(Ea, Line)], ea: Ea) -> Option<usize> {
+    let (first, last) = (lines.first()?.0, lines.last()?.0);
+    if ea < first || ea > last {
+        return None;
+    }
+    let mut best = None;
+    for (li, (lea, line)) in lines.iter().enumerate() {
+        if *lea == ea {
+            best.get_or_insert(li);
+            let t = line.text.trim();
+            if !t.is_empty() && !t.starts_with(';') && !(t.ends_with(':') && !t.contains(' ')) {
+                return Some(li);
+            }
+        }
+    }
+    best.or_else(|| Some(lines.iter().rposition(|(lea, _)| *lea <= ea).unwrap_or(0)))
+}
+
+/// Folds a long block: (lines to show, the full lines, chip index).
+fn fold_lines(lines: Vec<(Ea, Line)>) -> (Vec<(Ea, Line)>, Option<Vec<(Ea, Line)>>, Option<usize>) {
+    if lines.len() <= FOLD_OVER {
+        return (lines, None, None);
+    }
+    let hidden = lines.len() - 2 * FOLD_KEEP;
+    let text = format!("\u{22ef} {hidden} lines hidden (click to expand)");
+    let mut chip = Line::plain(text.clone());
+    chip.runs = vec![tags::Run {
+        range: 0..text.len(),
+        color: tags::color::REGCMT,
+    }];
+    let mut shown: Vec<(Ea, Line)> = lines[..FOLD_KEEP].to_vec();
+    shown.push((lines[FOLD_KEEP].0, chip));
+    shown.extend_from_slice(&lines[lines.len() - FOLD_KEEP..]);
+    (shown, Some(lines), Some(FOLD_KEEP))
 }
 
 pub struct GraphView {
@@ -147,32 +194,41 @@ impl GraphView {
     }
 
     fn locate(&self, ea: Ea) -> Option<(usize, usize)> {
-        for (bi, b) in self.blocks.iter().enumerate() {
-            let first = b.lines.first()?.0;
-            let last = b.lines.last()?.0;
-            if ea >= first && ea <= last {
-                // Prefer the instruction line of the item, as in the listing.
-                let mut best = None;
-                for (li, (lea, line)) in b.lines.iter().enumerate() {
-                    if *lea == ea {
-                        best.get_or_insert(li);
-                        let t = line.text.trim();
-                        if !t.is_empty()
-                            && !t.starts_with(';')
-                            && !(t.ends_with(':') && !t.contains(' '))
-                        {
-                            return Some((bi, li));
-                        }
-                    }
-                }
-                if let Some(li) = best {
-                    return Some((bi, li));
-                }
-                let li = b.lines.iter().rposition(|(lea, _)| *lea <= ea).unwrap_or(0);
-                return Some((bi, li));
-            }
+        self.blocks
+            .iter()
+            .enumerate()
+            .find_map(|(bi, b)| locate_line(&b.lines, ea).map(|li| (bi, li)))
+    }
+
+    /// Shows the whole of a folded block; the caret keeps its line.
+    fn expand_block(&mut self, bi: usize) {
+        let Some(b) = self.blocks.get_mut(bi) else {
+            return;
+        };
+        let (Some(full), Some(chip)) = (b.full.take(), b.chip.take()) else {
+            return;
+        };
+        let grown = full.len() - b.lines.len();
+        b.lines = full;
+        if let Some((cb, cl)) = &mut self.cursor
+            && *cb == bi
+            && *cl > chip
+        {
+            *cl += grown;
         }
-        None
+        self.relayout();
+    }
+
+    /// Expands the block that hides the item at `ea`, if any.
+    fn unfold_for(&mut self, ea: Ea) {
+        let hit = self.blocks.iter().position(|b| {
+            b.full.as_ref().is_some_and(|f| {
+                locate_line(f, ea).is_some_and(|li| li >= FOLD_KEEP && li < f.len() - FOLD_KEEP)
+            })
+        });
+        if let Some(bi) = hit {
+            self.expand_block(bi);
+        }
     }
 
     fn follow_address(&mut self, ea: Ea, center: bool, cx: &mut Context<Self>) {
@@ -183,6 +239,7 @@ impl GraphView {
         let func = self.session.read(cx).function_at(ea).map(|f| f.start);
         match func {
             Some(f) if Some(f) == self.func && !self.loading => {
+                self.unfold_for(ea);
                 if let Some(c) = self.locate(ea) {
                     self.cursor = Some(c);
                     self.reveal(c, center);
@@ -224,25 +281,30 @@ impl GraphView {
                         v.blocks = g
                             .blocks
                             .into_iter()
-                            .map(|b| Block {
-                                start: b.start,
-                                end: b.end,
-                                lines: {
-                                    let eas: Vec<Ea> = b.lines.iter().map(|l| l.ea).collect();
-                                    let mut parsed: Vec<Line> =
-                                        b.lines.iter().map(|l| tags::parse(&l.tagged)).collect();
-                                    tags::compact_block(&mut parsed);
-                                    eas.into_iter().zip(parsed).collect()
-                                },
-                                succ_kinds: b
-                                    .succs
-                                    .iter()
-                                    .map(|s| (s.to as usize, s.kind))
-                                    .collect(),
+                            .map(|b| {
+                                let eas: Vec<Ea> = b.lines.iter().map(|l| l.ea).collect();
+                                let mut parsed: Vec<Line> =
+                                    b.lines.iter().map(|l| tags::parse(&l.tagged)).collect();
+                                tags::compact_block(&mut parsed);
+                                let (lines, full, chip) =
+                                    fold_lines(eas.into_iter().zip(parsed).collect());
+                                Block {
+                                    start: b.start,
+                                    end: b.end,
+                                    lines,
+                                    succ_kinds: b
+                                        .succs
+                                        .iter()
+                                        .map(|s| (s.to as usize, s.kind))
+                                        .collect(),
+                                    full,
+                                    chip,
+                                }
                             })
                             .collect();
                         v.relayout();
                         let wanted = v.wanted.unwrap_or(func);
+                        v.unfold_for(wanted);
                         v.cursor = v.locate(wanted).or(Some((0, 0)));
                         if !keep_view {
                             v.zoom = 1.;
@@ -418,6 +480,9 @@ impl GraphView {
                     self.session
                         .update(cx, |s, cx| s.set_cursor(ea, Origin::Graph, cx));
                 }
+                if self.blocks.get(b).is_some_and(|k| k.chip == Some(l)) {
+                    self.expand_block(b);
+                }
                 self.publish_caret(cx);
                 if ev.click_count >= 2 {
                     self.follow(cx);
@@ -472,7 +537,18 @@ impl GraphView {
 
     fn follow(&mut self, cx: &mut Context<Self>) {
         let Some(ea) = self.cursor_ea() else { return };
-        if let Some(token) = self.token() {
+        if let Some((b, l)) = self.cursor
+            && self.blocks.get(b).is_some_and(|k| k.chip == Some(l))
+        {
+            self.expand_block(b);
+            return;
+        }
+        let token = self.cursor.and_then(|(b, l)| {
+            let line = &self.blocks.get(b)?.lines.get(l)?.1;
+            let r = code::follow_token_at(line, self.caret_col)?;
+            Some(line.text[r].to_owned())
+        });
+        if let Some(token) = token {
             commands::follow_token(&self.session, token, ea, cx);
         }
     }
@@ -526,11 +602,13 @@ impl GraphView {
                 }
             }
         }
-        let is_insn = |t: &str| {
-            let t = t.trim();
-            !t.is_empty() && !t.starts_with(';') && !(t.ends_with(':') && !t.contains(' '))
-        };
-        let insns: Vec<&(Ea, Line)> = b.lines.iter().filter(|(_, l)| is_insn(&l.text)).collect();
+        let insns: Vec<&(Ea, Line)> = b
+            .full
+            .as_ref()
+            .unwrap_or(&b.lines)
+            .iter()
+            .filter(|(_, l)| l.is_instruction())
+            .collect();
         let terminator = insns
             .last()
             .map(|(_, l)| l.text.split_whitespace().collect::<Vec<_>>().join(" "))

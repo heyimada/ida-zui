@@ -1847,6 +1847,16 @@ fn python_and_events(
     drain(events);
 }
 
+/// Big samples (shell32.dll has 34k functions) would make the dump megabytes:
+/// lists are written as their first `DUMP_CAP` entries plus the full count.
+const DUMP_CAP: usize = 200;
+
+fn capped_note(out: &mut impl std::fmt::Write, len: usize) {
+    if len > DUMP_CAP {
+        writeln!(out, "(first {DUMP_CAP} of {len})").unwrap();
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let binary = PathBuf::from(args.next().expect("usage: e2e <binary> [artifact-dir]"));
@@ -1896,7 +1906,8 @@ fn main() {
     analysis_events(&open_events, funcs.len(), &mut out, &mut check);
     eprintln!("[{:6.1}s] functions", t0.elapsed().as_secs_f32());
     writeln!(out, "\n== functions ({})", funcs.len()).unwrap();
-    for f in &funcs {
+    capped_note(&mut out, funcs.len());
+    for f in funcs.iter().take(DUMP_CAP) {
         writeln!(
             out,
             "{:#x}-{:#x} lib={} thunk={} {}",
@@ -1922,14 +1933,16 @@ fn main() {
     let imports = client.call_blocking(Imports {}).unwrap();
     eprintln!("[{:6.1}s] imports", t0.elapsed().as_secs_f32());
     writeln!(out, "\n== imports ({})", imports.len()).unwrap();
-    for i in &imports {
+    capped_note(&mut out, imports.len());
+    for i in imports.iter().take(DUMP_CAP) {
         writeln!(out, "{:#x} {}!{}", i.ea, i.module, i.name).unwrap();
     }
 
     let exports = client.call_blocking(Exports {}).unwrap();
     eprintln!("[{:6.1}s] exports", t0.elapsed().as_secs_f32());
     writeln!(out, "\n== exports ({})", exports.len()).unwrap();
-    for e in &exports {
+    capped_note(&mut out, exports.len());
+    for e in exports.iter().take(DUMP_CAP) {
         writeln!(out, "{:#x} #{} {}", e.ea, e.ordinal, e.name).unwrap();
     }
 

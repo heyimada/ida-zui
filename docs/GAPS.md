@@ -17,48 +17,52 @@ Nothing open: S1 to S4 are resolved (see Phase 8a below).
 
 | # | Gap | Source | Pri | Suggested fix |
 |---|---|---|---|---|
-| L2 | Graph blocks that start with `var_xx = …` frame lines still look indented. Those lines sit at column 0 while the instructions are indented. | 4 | P3 | Show frame-variable lines in a muted header section of the entry block, or trim them separately. |
-| L3 | The graph doesn't fold long blocks. The design shows an "N earlier instructions" fold chip. | 2b | P3 | Collapse blocks over about 40 lines around the caret line, and expand on click. |
 
 ## Editors and types
 
 | # | Gap | Source | Pri | Suggested fix |
 |---|---|---|---|---|
-| E2 | An unterminated `/*` is silently accepted by IDA's parser. No warning is shown. | 3 | P3 | Lint the text client-side with the editor's highlighter state before applying. |
 | E4 | IME composition in the code editor and text inputs is untested, for example Japanese or German dead keys. | 3 | P2 | Test it manually once on a real keyboard. The automation channel bypasses IME. |
 
 ## Python console
 
 | # | Gap | Source | Pri | Suggested fix |
 |---|---|---|---|---|
-| P1 | There's no IDC console, only Python. | 5 | P3 | Add a language switch (Python / IDC) using the IDC extlang `eval_snippet`. |
-| P4 | Cancel interrupts only while Python executes bytecode. A long C call or `time.sleep` blocks until it returns. | 5 | P3 | Document the limitation in the UI. Offer "Kill host" after a timeout, with the unsaved-changes warning. |
 
 ## Shell, menus and settings
 
 | # | Gap | Source | Pri | Suggested fix |
 |---|---|---|---|---|
 | M2 | A real mouse click on the database chips in the title strip (the custom drag region) is untested. | 4 | P1 | Test by hand. Make sure the chips aren't part of the OS caption hit-test area. |
-| M5 | Recent files show no processor or architecture badge, though the design shows one. | 2b | P3 | Store the processor and bitness in the recent-files entry when a database opens. |
-| M6 | The palette's "Names" group is mostly empty, because names at function addresses are deduplicated into Functions. | 2b | P3 | Show non-function names only (data, labels), and say so in the group header. |
-| M7 | The High contrast and IDA Classic themes were never reviewed against a mockup. | 2b | P3 | Review both by screenshot in the final sweep and tune their token values. |
 
 ## Debugger
 
 | # | Gap | Source | Pri | Suggested fix |
 |---|---|---|---|---|
-| D4 | The listing and hex view show the database's bytes, not process memory, while debugging; self-modifying or unpacked code looks stale. | 7 | P2 | An optional "show process memory" mode, or a refresh-from-memory command for a range (IDA: refresh memory, take memory snapshot). |
-| D5 | xmm/ymm registers are fetched but not shown. | 7 | P3 | A vector register section in the Registers panel. |
-| D6 | The Threads list has no per-thread instruction pointer. | 7 | P3 | Read each thread's RIP/EIP while suspended and add a column. |
-| D7 | The pseudocode instruction-pointer marker snaps to the nearest statement address, not an exact instruction. | 7 | P3 | Use the ctree item addresses to mark the exact instruction's statement. |
-| D8 | First or last chance of an exception is inferred, and hit counts are the UI session's own count, not IDA's. | 7 | P3 | Read IDA's breakpoint hit count; keep the inference for exceptions (the API gives none). |
+| D8 | First or last chance of an exception is inferred, and hit counts are the UI session's own count, not IDA's. | 7 | P3 | Left as is: IDA's API gives no chance flag and no hit count to read (noted in the README). |
 
 ## Loader and host
 
 | # | Gap | Source | Pri | Suggested fix |
 |---|---|---|---|---|
-| H1 | `tricore`, `msp430` and `xtensa` don't round-trip headless through the `DEFAULT_PROCESSOR` workaround, so the open dialog doesn't offer them. | 2 | P3 | Investigate the processor module names and IDAUSR mapping per module. Add each one back once verified. |
-| H2 | The shell32 E2E dump is 5.7 MB, because the full lists and pseudocode are written out. | 1 | P3 | Cap the list sections in the dump, for example the first 200 entries plus counts, for samples above a size threshold. |
+| H1 | `tricore`, `msp430` and `xtensa` don't round-trip headless through the `DEFAULT_PROCESSOR` workaround, so the open dialog doesn't offer them. Retried in 8b with the module names, upper case and mixed case: each still opens as metapc. | 2 | P3 | Investigate the processor module names and IDAUSR mapping per module. Add each one back once verified. |
+
+## Resolved in Phase 8b
+
+- **D4 Process memory:** `Debugger > Hex view: process memory` switches the hex view to `dbg_mem_read` pages (re-read at every stop, "PROCESS MEMORY" badge). Verified on the self-built debuggee: `ida_dbg.write_dbg_memory` wrote `IZSTEST!` at RIP from the Python console and the hex view showed it with the toggle on.
+- **D5 Vector registers:** the Registers panel lists xmm/ymm/zmm (>= 128 bit) below the general registers, read-only (screenshot).
+- **D6 Thread IPs and names:** `dbg_threads` selects each thread, reads its IP and restores the selection (E2E: every thread has an IP, the current one equals RIP, the selection is unchanged). Threads whose "name" is a raw address show as `thread <tid>`.
+- **D7 Pseudocode marker:** by design it uses the exact ctree item address when Hex-Rays has one at the instruction pointer and the enclosing statement otherwise; nothing finer exists in the ctree. Documented.
+- **L2 Frame lines:** `proc` and `var_x = ... ptr` lines no longer count as instructions when the block's shared indent is trimmed (unit test), so entry blocks are flush (screenshot).
+- **L3 Long blocks:** blocks over 40 lines fold to 14 head + chip + 14 tail lines; the chip, Enter on it, or a jump into the hidden part expands the block (screenshot).
+- **E2 Unterminated comment:** `declerr::unterminated_comment` (tests first) marks the line and warns on Apply (screenshot).
+- **P1 IDC console:** a Python / IDC button in the console header; IDC runs through `ida_expr.eval_idc_expr` / `compile_idc_snippet` (screenshots: `2+2`, `auto x = 5; ... Message(...)`, errors).
+- **P4 Kill host:** 4 s after Cancel the strip offers "Kill host..." (second click kills, with the unsaved warning); the unpacked database files are removed (screenshots).
+- **M5 Recent badge**, **M6 Names group** (non-function names, header says so; an exact name match now ranks first), **M7 themes** (High contrast and IDA Classic tuned; a unit test asserts 4.5:1 for every text token on every surface).
+- **H2:** list sections of the E2E dump are capped at 200 entries plus the count (not re-run on shell32.dll).
+- **Proximity, off-screen nodes (L8 leftover):** after a + expansion or opening a "+N more" chip the view pans, and zooms out down to 30% if needed, until the new nodes and their anchor are in view (it does nothing when they already are). Screenshots: expanding `__mainCRTStartup`'s callees, and opening the callee chip of `FIND::Initialize`.
+- **Proximity, Data nodes:** data nodes did render (yellow strip, listed in the legend) but never made the per-node fan-out cut, because functions filled it. The host now gives data targets a quota of their own (a third of the fan-out) when Data is on. Screenshots with Data on: `asc_140004504`, `aI`, `aV`, `aC` and `__xi_z`, `__native_startup_state` appear with the data colour, after opening the chip or expanding.
+- Left for a human: **E4** (IME) and **M2** (real mouse on the title chips); nothing in 8b touches either.
 
 ## Resolved in Phase 8a
 

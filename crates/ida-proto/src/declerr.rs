@@ -196,6 +196,35 @@ fn line_starts(text: &str) -> Vec<usize> {
         .collect()
 }
 
+/// IDA's parser takes an unterminated `/*` as a comment up to the end of the
+/// text without a word. This finds the first one (the line it opens on).
+pub fn unterminated_comment(decl: &str) -> Option<DeclError> {
+    let b = decl.as_bytes();
+    let mut i = 0;
+    while i + 1 < b.len() {
+        if b[i] == b'/' && b[i + 1] == b'/' {
+            i += b[i..]
+                .iter()
+                .position(|&c| c == b'\n')
+                .unwrap_or(b.len() - i);
+        } else if b[i] == b'/' && b[i + 1] == b'*' {
+            match decl[i + 2..].find("*/") {
+                Some(p) => i += 2 + p + 2,
+                None => {
+                    return Some(DeclError {
+                        line: decl[..i].matches('\n').count(),
+                        message: "Unterminated /* comment: everything after it is ignored"
+                            .to_owned(),
+                    });
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
 /// `text` with comments blanked out (same byte offsets, newlines kept).
 fn mask_comments(text: &str) -> String {
     let b = text.as_bytes();

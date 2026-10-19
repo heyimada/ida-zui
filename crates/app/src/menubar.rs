@@ -277,6 +277,7 @@ pub fn build(ready: bool, view: ViewState, dbs: &[DbEntry], cx: &App) -> Vec<Men
             vec![
                 c!(OpenFile, "Open…"),
                 c!(OpenWithOptions, "Open with options…"),
+                c!(LocateIda, "Locate IDA…"),
                 Entry::Sub {
                     label: "Recent files".into(),
                     enabled: has_recent,
@@ -353,7 +354,12 @@ pub fn build(ready: bool, view: ViewState, dbs: &[DbEntry], cx: &App) -> Vec<Men
         m(
             "Search",
             0,
-            vec![c!(SearchBytes, "Bytes…"), c!(SearchText, "Text…")],
+            vec![
+                c!(SearchText, "Text…"),
+                c!(SearchNextText, "Text again"),
+                c!(SearchBytes, "Bytes…"),
+                c!(SearchNextBytes, "Bytes again"),
+            ],
         ),
         m(
             "View",
@@ -426,6 +432,8 @@ pub fn build(ready: bool, view: ViewState, dbs: &[DbEntry], cx: &App) -> Vec<Men
                         c!(ShowExceptions),
                     ],
                 },
+                Entry::Sep,
+                gate(c!(HexProcessMemory), view.debug_suspended),
                 Entry::Sep,
                 c!(DebuggerOptions),
             ],

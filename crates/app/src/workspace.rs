@@ -233,6 +233,7 @@ impl Workspace {
             inspector,
             bottom,
             goto_choices: None,
+            last_search: None,
             pending_goto: None,
             chip: (TabKind::Empty, false, 0),
             _subs: vec![sub, observe, inspector_sub, bottom_sub],
@@ -1459,7 +1460,19 @@ impl Workspace {
         } else {
             req.database_path()
         };
-        settings::update(cx, |s| s.touch_recent(&path, settings::unix_now()));
+        let arch = self.dbs[ix]
+            .session
+            .read(cx)
+            .info
+            .as_ref()
+            .map(|i| chrome::arch_label(&i.processor, i.bitness))
+            .unwrap_or_default();
+        settings::update(cx, |s| {
+            s.touch_recent(&path, settings::unix_now());
+            if let Some(r) = s.recent.first_mut() {
+                r.arch = arch;
+            }
+        });
     }
 
     fn run_menu_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
@@ -1486,6 +1499,46 @@ impl Workspace {
     fn open_menu(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.menubar
             .update(cx, |m, cx| m.open_by_index(ix, window, cx));
+    }
+
+    /// "Locate IDA...": pick the IDA folder (the one with `idalib.dll`) and
+    /// remember it in the settings. `IDADIR` still overrides it.
+    pub fn locate_ida(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Select the IDA Pro folder (contains idalib.dll)".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = paths.await
+                && let Some(dir) = paths.into_iter().next()
+            {
+                this.update_in(cx, |w, _, cx| w.set_ida_dir(dir, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Validates and stores a picked IDA folder.
+    pub fn set_ida_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        if !ida_proto::client::is_ida_dir(&dir) {
+            self.session.update(cx, |s, cx| {
+                s.error(
+                    format!(
+                        "No idalib.dll in {}: pick the IDA install folder",
+                        dir.display()
+                    ),
+                    cx,
+                )
+            });
+            return;
+        }
+        settings::update(cx, |s| s.ida_dir = Some(dir.display().to_string()));
+        self.session.update(cx, |s, cx| {
+            s.info_msg(format!("Using IDA in {}", dir.display()), cx)
+        });
+        cx.notify();
     }
 
     fn prompt_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1629,7 +1682,7 @@ impl Workspace {
                     label: n.name.clone().into(),
                     detail: format!("{:X}", n.ea).into(),
                     kind: "name".into(),
-                    group: "Names".into(),
+                    group: "Names (data, labels, imports)".into(),
                     keywords: SharedString::default(),
                     value: ChoiceValue::Ea(n.ea),
                 });
@@ -1805,46 +1858,71 @@ impl Workspace {
         );
     }
 
+    /// Alt+T / Alt+B: asks for the pattern (the last one is prefilled).
     fn search(&mut self, bytes: bool, cx: &mut Context<Self>) {
-        let session = self.session.clone();
-        let (title, hint) = if bytes {
-            ("Search bytes (e.g. 48 8B ?? 24)", "")
+        let title = if bytes {
+            "Search bytes (e.g. 48 8B ?? 24)"
         } else {
-            ("Search text", "")
+            "Search text"
         };
-        self.session.update(cx, |s, cx| {
+        let initial = match &self.last_search {
+            Some((b, q)) if *b == bytes => q.clone(),
+            _ => String::new(),
+        };
+        let ws = cx.entity().downgrade();
+        let session = self.session.clone();
+        session.update(cx, |s, cx| {
             s.prompt(
                 title,
-                hint,
+                initial,
                 move |q, cx| {
-                    let from = session.read(cx).cursor;
-                    let fut = if bytes {
-                        futures::future::Either::Left(session.read(cx).call(FindBytes {
-                            ea: from,
-                            pattern: q.clone(),
-                            forward: true,
-                        }))
-                    } else {
-                        futures::future::Either::Right(session.read(cx).call(FindText {
-                            ea: from,
-                            text: q.clone(),
-                            forward: true,
-                        }))
-                    };
-                    let session = session.clone();
-                    cx.spawn(async move |cx| {
-                        let r = fut.await;
-                        session.update(cx, |s, cx| match r {
-                            Ok(Some(ea)) => s.navigate(ea, cx),
-                            Ok(None) => s.info_msg(format!("'{q}' not found below the cursor"), cx),
-                            Err(e) => s.error(e.to_string(), cx),
-                        });
+                    ws.update(cx, |w, cx| {
+                        w.last_search = Some((bytes, q.clone()));
+                        w.run_search(bytes, q, cx);
                     })
-                    .detach();
+                    .ok();
                 },
                 cx,
             )
         });
+    }
+
+    /// Ctrl+T / Ctrl+B: repeats the last search from the cursor.
+    fn search_next(&mut self, bytes: bool, cx: &mut Context<Self>) {
+        match self.last_search.clone() {
+            Some((b, q)) if b == bytes => self.run_search(bytes, q, cx),
+            _ => self.search(bytes, cx),
+        }
+    }
+
+    fn run_search(&mut self, bytes: bool, q: String, cx: &mut Context<Self>) {
+        let session = self.session.clone();
+        let from = session.read(cx).cursor;
+        let fut = if bytes {
+            futures::future::Either::Left(session.read(cx).call(FindBytes {
+                ea: from,
+                pattern: q.clone(),
+                forward: true,
+            }))
+        } else {
+            futures::future::Either::Right(session.read(cx).call(FindText {
+                ea: from,
+                text: q.clone(),
+                forward: true,
+            }))
+        };
+        session.update(cx, |s, cx| {
+            s.info_msg(format!("Searching for '{q}'..."), cx)
+        });
+        cx.spawn(async move |_, cx| {
+            let r = fut.await;
+            session.update(cx, |s, cx| match r {
+                Ok(Some(ea)) => s.navigate(ea, cx),
+                Ok(None) => s.info_msg(format!("'{q}' not found below the cursor"), cx),
+                Err(e) => s.error(e.to_string(), cx),
+            });
+        })
+        .detach();
     }
 
     // ---- rendering the main area ------------------------------------------
@@ -2207,6 +2285,9 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|w, _: &ShowMemory, _, cx| w.show_debug_tab(BottomTab::Memory, cx)),
             )
+            .on_action(cx.listener(|w, _: &HexProcessMemory, _, cx| {
+                w.hex.update(cx, |h, cx| h.toggle_process_memory(cx))
+            }))
             .on_action(
                 cx.listener(|w, _: &ShowCallStack, _, cx| {
                     w.show_debug_tab(BottomTab::CallStack, cx)
@@ -2305,6 +2386,7 @@ impl Render for Workspace {
                 cx.listener(|w, _: &Forward, _, cx| w.session.update(cx, |s, cx| s.forward(cx))),
             )
             .on_action(cx.listener(|w, _: &OpenFile, window, cx| w.prompt_open(window, cx)))
+            .on_action(cx.listener(|w, _: &LocateIda, window, cx| w.locate_ida(window, cx)))
             .on_action(cx.listener(|w, _: &OpenWithOptions, window, cx| {
                 w.open_options_dialog(None, window, cx)
             }))
@@ -2353,6 +2435,8 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(|w, _: &SearchBytes, _, cx| w.search(true, cx)))
             .on_action(cx.listener(|w, _: &SearchText, _, cx| w.search(false, cx)))
+            .on_action(cx.listener(|w, _: &SearchNextBytes, _, cx| w.search_next(true, cx)))
+            .on_action(cx.listener(|w, _: &SearchNextText, _, cx| w.search_next(false, cx)))
             .on_action(cx.listener(|w, _: &OpenSettings, window, cx| {
                 w.open_settings(Section::Appearance, window, cx)
             }))

@@ -262,11 +262,21 @@ impl ProximityView {
                 }
                 match r {
                     Ok(graph) => {
+                        let before: Vec<Ea> = v.nodes.iter().map(|n| n.info.ea).collect();
                         v.parts.push(Part {
                             anchor: Some((ea, dir)),
                             graph,
                         });
                         v.rebuild();
+                        // The new nodes may lie off screen: bring them in.
+                        let mut show: Vec<Ea> = v
+                            .nodes
+                            .iter()
+                            .map(|n| n.info.ea)
+                            .filter(|e| !before.contains(e))
+                            .collect();
+                        show.push(ea);
+                        v.reveal(&show);
                     }
                     Err(e) => v
                         .session
@@ -455,8 +465,17 @@ impl ProximityView {
         match self.hit_node(gx, gy) {
             Some(i) if self.nodes[i].info.kind == MORE => {
                 let depth = self.nodes[i].info.depth;
+                let before: Vec<Ea> = self.nodes.iter().map(|n| n.info.ea).collect();
                 self.expanded.push(depth);
                 self.relayout();
+                let mut show: Vec<Ea> = self
+                    .nodes
+                    .iter()
+                    .map(|n| n.info.ea)
+                    .filter(|e| !before.contains(e))
+                    .collect();
+                show.push(self.centre);
+                self.reveal(&show);
             }
             Some(i) => {
                 let ea = self.nodes[i].info.ea;
@@ -543,6 +562,39 @@ impl ProximityView {
             let (cx, cy) = r.map_or((gw / 2., gh / 2.), |r| (r.x + r.w / 2., r.y + r.h / 2.));
             self.pan = point(px(w / 2. - cx * READABLE), px(h / 2. - cy * READABLE));
         }
+    }
+
+    /// Pans (and zooms out, down to the readable limit) so the nodes `eas`
+    /// are all in view; does nothing when they already are.
+    fn reveal(&mut self, eas: &[Ea]) {
+        let Some(bounds) = self.bounds else { return };
+        let rects: Vec<_> = eas
+            .iter()
+            .filter_map(|e| self.index_of(*e))
+            .filter_map(|i| self.layout.nodes.get(i).copied())
+            .collect();
+        if rects.is_empty() {
+            return;
+        }
+        let x0 = rects.iter().map(|r| r.x).fold(f32::MAX, f32::min);
+        let y0 = rects.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+        let x1 = rects.iter().map(|r| r.x + r.w).fold(f32::MIN, f32::max);
+        let y1 = rects.iter().map(|r| r.y + r.h).fold(f32::MIN, f32::max);
+        let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let (px0, py0) = (f32::from(self.pan.x), f32::from(self.pan.y));
+        let z = self.zoom;
+        let inside =
+            px0 + x0 * z >= 0. && py0 + y0 * z >= 0. && px0 + x1 * z <= w && py0 + y1 * z <= h;
+        if inside {
+            return;
+        }
+        let (bw, bh) = ((x1 - x0).max(1.), (y1 - y0).max(1.));
+        let z = z.min((w - 48.) / bw).min((h - 48.) / bh).max(READABLE);
+        self.zoom = z;
+        self.pan = point(
+            px((w - bw * z) / 2. - x0 * z),
+            px(((h - bh * z) / 2.).max(16.) - y0 * z),
+        );
     }
 
     fn minimap_click(&mut self, p: Point<Pixels>) -> bool {
@@ -909,10 +961,11 @@ impl ProximityView {
                     v.load(cx);
                 })),
             )
-            .child(div().flex_1())
+            .child(div().flex_1().min_w(px(24.)))
             .child(
                 div()
                     .flex()
+                    .flex_none()
                     .items_center()
                     .gap(px(16.))
                     .text_size(px(11.))

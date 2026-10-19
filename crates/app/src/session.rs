@@ -333,6 +333,11 @@ impl Session {
     }
 
     fn start_host(&mut self, req: OpenRequest, fresh: bool, cx: &mut Context<Self>) {
+        if let Some(problem) = host_config(&req).problem() {
+            self.phase = Phase::Failed(problem.message().into());
+            cx.notify();
+            return;
+        }
         let (client, mut logs, mut events) = match Client::spawn_with_events(&host_config(&req)) {
             Ok(t) => t,
             Err(e) => {
@@ -411,7 +416,26 @@ impl Session {
                     }
                     Err(e) => {
                         s.analysis = None;
-                        s.phase = Phase::Failed(e.to_string().into());
+                        let mut msg = e.to_string();
+                        // A host that died while starting (a licence or
+                        // install problem) explains itself on stderr.
+                        if matches!(e, ida_proto::client::ClientError::HostGone(_)) {
+                            let tail: Vec<&str> = s
+                                .log
+                                .iter()
+                                .map(|l| l.trim())
+                                .filter(|l| !l.is_empty())
+                                .rev()
+                                .take(6)
+                                .collect();
+                            if !tail.is_empty() {
+                                msg.push('\n');
+                                msg.push_str(
+                                    &tail.into_iter().rev().collect::<Vec<_>>().join("\n"),
+                                );
+                            }
+                        }
+                        s.phase = Phase::Failed(msg.into());
                     }
                 }
                 cx.notify();
@@ -691,6 +715,33 @@ impl Session {
     /// Closes the database, saving if asked, and resolves once the host has
     /// acknowledged and exited. A host that does not answer within
     /// `CLOSE_TIMEOUT` is killed so it cannot block the caller forever.
+    /// Ends a host that is stuck inside a call that cannot be interrupted.
+    /// The database is gone without a save; the tab shows why.
+    pub fn kill_host(&mut self, cx: &mut Context<Self>) {
+        let idb = self.info.as_ref().map(|i| i.idb_path.clone());
+        if let Some(c) = self.client.take() {
+            c.kill();
+        }
+        // The killed host leaves its unpacked working files behind; IDA
+        // would pick them up as if they were a crashed session's.
+        if let Some(idb) = idb {
+            std::thread::spawn(move || remove_unpacked(std::path::Path::new(&idb)));
+        }
+        self.phase = Phase::Failed(
+            "The IDA host was killed. Unsaved changes were lost; open the file again to continue."
+                .into(),
+        );
+        self.info = None;
+        self.dirty = false;
+        self.analysis = None;
+        self.python_running = false;
+        self.ext_pending = false;
+        self.ext_task = None;
+        self.dbg = DebugModel::new();
+        cx.emit(SessionEvent::Closed);
+        cx.notify();
+    }
+
     pub fn close(&mut self, save: bool, cx: &mut Context<Self>) -> Task<()> {
         let analyzing = self.analyzing();
         let client = self.client.take();
@@ -730,6 +781,24 @@ impl Session {
         let info = self.info.as_ref()?;
         let path = std::path::Path::new(&info.input_path);
         Some(path.file_name()?.to_string_lossy().into_owned())
+    }
+}
+
+/// Deletes `<db>.id0/.id1/.id2/.nam/.til`, retrying while the dying host
+/// still holds them.
+fn remove_unpacked(idb: &std::path::Path) {
+    for _ in 0..25 {
+        let mut left = false;
+        for ext in ["id0", "id1", "id2", "nam", "til"] {
+            let p = idb.with_extension(ext);
+            if p.exists() && std::fs::remove_file(&p).is_err() {
+                left = true;
+            }
+        }
+        if !left {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
 

@@ -145,6 +145,9 @@ pub struct DbgThread {
     pub tid: u32,
     pub name: String,
     pub current: bool,
+    /// The thread's instruction pointer (0 when it could not be read).
+    #[serde(default)]
+    pub ip: Ea,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

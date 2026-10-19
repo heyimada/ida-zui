@@ -549,7 +549,7 @@ pub enum HostEvent {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct VersionInfo {
-    /// IDA's version string, e.g. `9.x.0`.
+    /// IDA's version string, e.g. `9.0.0`.
     pub ida_version: String,
     pub ida_dir: String,
     /// IDA's per-user directory (plugins, cfg).

@@ -167,12 +167,16 @@ impl Modal {
         if q.is_empty() {
             self.filtered.extend(0..self.choices.len().min(MAX_RESULTS));
         } else {
-            // Prefix matches first, then substring matches.
+            // An exact match first (typing `main` must land on `main`), then
+            // prefix matches, then substring matches.
+            let mut exact = Vec::new();
             let mut prefix = Vec::new();
             let mut sub = Vec::new();
             for (i, c) in self.choices.iter().enumerate() {
                 let l = c.label.to_lowercase();
-                if l.starts_with(&q) {
+                if l == q {
+                    exact.push(i);
+                } else if l.starts_with(&q) {
                     prefix.push(i);
                 } else if l.contains(&q)
                     || c.detail.to_lowercase().contains(&q)
@@ -181,6 +185,7 @@ impl Modal {
                     sub.push(i);
                 }
             }
+            self.filtered.extend(exact);
             self.filtered.extend(prefix);
             self.filtered.extend(sub);
             self.filtered.truncate(MAX_RESULTS * 4);

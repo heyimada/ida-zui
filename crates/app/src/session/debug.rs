@@ -206,6 +206,7 @@ impl Session {
     /// the views to the instruction pointer.
     fn dbg_fetch_stop(&mut self, ip: Option<Ea>, cx: &mut Context<Self>) {
         let regs = self.call(DbgRegs { all: false });
+        let vregs = self.call(DbgRegs { all: true });
         let frames = self.call(DbgStack {});
         let threads = self.call(DbgThreads {});
         let modules = self.call(DbgModules {});
@@ -218,6 +219,7 @@ impl Session {
         let mem_expr = self.dbg.mem_expr.clone();
         cx.spawn(async move |this, cx| {
             let regs = regs.await;
+            let vregs = vregs.await;
             let frames = frames.await;
             let threads = threads.await;
             let modules = modules.await;
@@ -253,6 +255,9 @@ impl Session {
                 if let Ok(r) = regs {
                     s.dbg.set_regs(r);
                 }
+                s.dbg.vregs = vregs
+                    .map(|v| v.into_iter().filter(|r| r.bits >= 128).collect())
+                    .unwrap_or_default();
                 if let Ok(f) = frames {
                     s.dbg.frames = f;
                 }

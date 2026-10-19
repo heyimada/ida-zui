@@ -178,7 +178,17 @@ impl Line {
     /// a bare label.
     pub fn is_instruction(&self) -> bool {
         let t = self.text.trim();
-        !t.is_empty() && !t.starts_with(';') && !(t.ends_with(':') && !t.contains(' '))
+        !t.is_empty()
+            && !t.starts_with(';')
+            && !(t.ends_with(':') && !t.contains(' '))
+            && !self.is_frame_decl()
+    }
+
+    /// The `name proc near` header and the `var_8 = qword ptr -8` frame
+    /// lines of an entry block: flush left, unlike the code under them.
+    pub fn is_frame_decl(&self) -> bool {
+        let t = self.text.trim();
+        t.contains(" proc ") || t.ends_with(" endp") || (t.contains(" = ") && t.contains(" ptr "))
     }
 
     /// Removes `n` leading spaces (at most the line's own indent) and moves
@@ -552,6 +562,24 @@ mod tests {
                 color: color::INSN
             }]
         );
+    }
+
+    #[test]
+    fn compact_block_lets_frame_and_proc_lines_stay_flush_with_the_instructions() {
+        // The entry block of a function: `proc`, frame variables, then code
+        // that IDA indents. The code must end up at the same column.
+        let mut b = vec![
+            Line::plain("main    proc near"),
+            Line::plain("var_298 = byte ptr -298h"),
+            Line::plain("arg_0   = qword ptr  8"),
+            insn(8, "sub     rsp, 2B8h"),
+            insn(8, "ret"),
+        ];
+        compact_block(&mut b);
+        assert_eq!(b[0].text, "main    proc near");
+        assert_eq!(b[1].text, "var_298 = byte ptr -298h");
+        assert_eq!(b[3].text, "sub     rsp, 2B8h");
+        assert_eq!(b[4].text, "ret");
     }
 
     #[test]

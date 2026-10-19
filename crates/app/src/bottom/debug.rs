@@ -159,6 +159,7 @@ impl BottomPanel {
             );
         }
         let regs: Vec<DbgReg> = s.dbg.regs.clone();
+        let vregs: Vec<DbgReg> = s.dbg.vregs.clone();
         let changed = s.dbg.changed.clone();
         let sym: Vec<Option<String>> = regs
             .iter()
@@ -300,7 +301,42 @@ impl BottomPanel {
                             .gap_x(px(16.))
                             .px(px(12.))
                             .py(px(6.))
-                            .children(cells),
+                            .children(cells)
+                            .when(!vregs.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .w_full()
+                                        .pt(px(8.))
+                                        .pb(px(2.))
+                                        .child(crate::ui::section_label("Vector registers", &t)),
+                                )
+                                .children(vregs.into_iter().map(|r| {
+                                    div()
+                                        .w_full()
+                                        .h(px(20.))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .child(
+                                            div()
+                                                .w(px(44.))
+                                                .flex_none()
+                                                .font_family(code_font_name())
+                                                .text_size(px(12.))
+                                                .text_color(hsla(t.syntax.reg))
+                                                .child(r.name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .font_family(code_font_name())
+                                                .text_size(px(12.))
+                                                .text_color(hsla(t.text))
+                                                .child(r.hex.to_uppercase()),
+                                        )
+                                }))
+                            }),
                     ),
             )
             .child(bar)
@@ -574,10 +610,11 @@ impl BottomPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        const COLS: [Col; 3] = [
+        const COLS: [Col; 4] = [
             Col::fixed("", 28.),
-            Col::fixed("Thread", 120.),
-            Col::flex("Name"),
+            Col::fixed("Thread", 110.),
+            Col::fixed("Name", 150.),
+            Col::flex("Instruction pointer"),
         ];
         let s = self.session.read(cx);
         if !s.dbg.active() {
@@ -591,6 +628,30 @@ impl BottomPanel {
             .enumerate()
             .map(|(i, th)| {
                 let tid = th.tid;
+                // IDA names some threads by their start address; that is no name.
+                let name = if th.name.is_empty()
+                    || th
+                        .name
+                        .trim_start_matches("0x")
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit())
+                {
+                    format!("thread {}", th.tid)
+                } else {
+                    th.name.clone()
+                };
+                let ip = if th.ip == 0 {
+                    String::new()
+                } else {
+                    {
+                        let sym = s.symbol_at(th.ip);
+                        if sym.starts_with("0x") {
+                            format!("{:X}", th.ip)
+                        } else {
+                            format!("{:X}  {sym}", th.ip)
+                        }
+                    }
+                };
                 table::row_shell(("thread", i), self.selected == Some(i), false, &t)
                     .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _, cx| {
                         v.selected = Some(i);
@@ -605,7 +666,8 @@ impl BottomPanel {
                         div().into_any_element()
                     }))
                     .child(table::cell(&COLS[1]).child(th.tid.to_string()))
-                    .child(table::cell(&COLS[2]).child(th.name.clone()))
+                    .child(table::cell(&COLS[2]).child(name))
+                    .child(table::cell(&COLS[3]).child(ip))
                     .into_any_element()
             })
             .collect();

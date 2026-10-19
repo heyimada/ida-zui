@@ -608,7 +608,22 @@ impl Render for BottomPanel {
                     })
                     .child(div().flex_1())
                     .when(self.tab == BottomTab::Python, |d| {
+                        let lang = if self.console.read(cx).idc {
+                            "IDC"
+                        } else {
+                            "Python"
+                        };
                         d.child(
+                            ui::button("py-lang", lang, ui::ButtonKind::Ghost, true, &t)
+                                .tooltip(ui::tip(
+                                    "Switch the console language (Python / IDC)",
+                                    None,
+                                ))
+                                .on_click(cx.listener(|v, _, _, cx| {
+                                    v.console.update(cx, |c, cx| c.toggle_language(cx))
+                                })),
+                        )
+                        .child(
                             ui::icon_button("py-run-file", "play", 24., false, true, &t)
                                 .tooltip(ui::tip(
                                     "Run script file…",

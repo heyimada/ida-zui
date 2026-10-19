@@ -61,6 +61,8 @@ pub struct Database {
     pub inspector: Entity<Inspector>,
     pub bottom: Entity<BottomPanel>,
     pub goto_choices: Option<Rc<Vec<Choice>>>,
+    /// The last search (`true` for bytes) and its text, for "search next".
+    pub last_search: Option<(bool, String)>,
     /// Jump here once the database finishes opening (CLI `--goto`).
     pub pending_goto: Option<String>,
     /// What the tab strip last showed for this database; an inactive tab

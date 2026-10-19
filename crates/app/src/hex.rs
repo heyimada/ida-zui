@@ -9,7 +9,7 @@ use gpui::{
     App, Bounds, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, Pixels,
     ScrollWheelEvent, Subscription, Window, canvas, div, point, prelude::*, px,
 };
-use ida_proto::{ByteChunk, Bytes, Ea, SegRow, Segments};
+use ida_proto::{ByteChunk, Bytes, DbgMemRead, Ea, SegRow, Segments};
 use std::collections::{HashMap, HashSet};
 
 const PAGE: u64 = 4096;
@@ -31,6 +31,8 @@ pub struct HexView {
     bounds: Option<Bounds<Pixels>>,
     char_w: f32,
     pub visible: bool,
+    /// Show the suspended process's memory instead of the database's bytes.
+    process: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -46,7 +48,14 @@ impl HexView {
                 this.pages.clear();
                 cx.notify();
             }
-            SessionEvent::DebugChanged => cx.notify(),
+            SessionEvent::DebugChanged => {
+                // The process ran or ended since the pages were read.
+                if this.process {
+                    this.pages.clear();
+                    this.pending.clear();
+                }
+                cx.notify();
+            }
             SessionEvent::Rebased { .. } => {
                 this.pages.clear();
                 this.load_segments(cx);
@@ -72,6 +81,7 @@ impl HexView {
             bounds: None,
             char_w: 7.8,
             visible: false,
+            process: false,
             _subs: vec![sub],
         }
     }
@@ -130,6 +140,35 @@ impl HexView {
         Some(chunk.get((ea - page) as usize))
     }
 
+    /// Process memory is shown only while the process is suspended.
+    fn shows_process(&self, cx: &App) -> bool {
+        self.process && self.session.read(cx).dbg.suspended()
+    }
+
+    /// Debugger > Hex view of process memory: switches the bytes between the
+    /// database and the suspended process (re-read at every stop).
+    pub fn toggle_process_memory(&mut self, cx: &mut Context<Self>) {
+        if !self.process && !self.session.read(cx).dbg.suspended() {
+            self.session.update(cx, |s, cx| {
+                s.info_msg(
+                    "Process memory is available while a process is suspended",
+                    cx,
+                )
+            });
+            return;
+        }
+        self.process = !self.process;
+        self.pages.clear();
+        self.pending.clear();
+        let msg = if self.process {
+            "Hex view shows process memory"
+        } else {
+            "Hex view shows the database"
+        };
+        self.session.update(cx, |s, cx| s.info_msg(msg, cx));
+        cx.notify();
+    }
+
     fn request_pages(&mut self, first_row: u64, rows: usize, cx: &mut Context<Self>) {
         let mut want = Vec::new();
         for r in first_row..(first_row + rows as u64).min(self.total_rows) {
@@ -149,12 +188,26 @@ impl HexView {
         if self.pages.len() > MAX_PAGES {
             self.pages.clear();
         }
+        let process = self.shows_process(cx);
         for page in want {
             self.pending.insert(page);
-            let fut = self.session.read(cx).call(Bytes {
-                ea: page,
-                len: PAGE as u32,
-            });
+            let fut = if process {
+                let call = self.session.read(cx).call(DbgMemRead {
+                    ea: page,
+                    len: PAGE as u32,
+                });
+                futures::future::Either::Left(async move {
+                    call.await.map(|m| ByteChunk {
+                        ea: m.ea,
+                        hex: m.hex,
+                    })
+                })
+            } else {
+                futures::future::Either::Right(self.session.read(cx).call(Bytes {
+                    ea: page,
+                    len: PAGE as u32,
+                }))
+            };
             cx.spawn(async move |this, cx| {
                 let result = fut.await;
                 this.update(cx, |v, cx| {
@@ -396,6 +449,19 @@ impl Render for HexView {
                 v.session.update(cx, |s, cx| s.navigate(ea, cx));
             }))
             .child(self.render_canvas(cx))
+            .when(self.shows_process(cx), |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(6.))
+                        .left(px(700.))
+                        .child(crate::ui::badge(
+                            "PROCESS MEMORY",
+                            crate::ui::BadgeKind::XrefWrite,
+                            &theme,
+                        )),
+                )
+            })
             .child(bar)
     }
 }

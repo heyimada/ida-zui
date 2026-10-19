@@ -60,6 +60,9 @@ pub struct DebugModel {
     pub exception: Option<StopException>,
     pub bpts: Vec<DbgBpt>,
     pub regs: Vec<DbgReg>,
+    /// xmm/ymm/zmm registers (128 bits and wider), shown read-only below the
+    /// general registers.
+    pub vregs: Vec<DbgReg>,
     /// Register values at the stop before this one, for highlighting.
     pub prev_regs: HashMap<String, String>,
     pub changed: HashSet<String>,

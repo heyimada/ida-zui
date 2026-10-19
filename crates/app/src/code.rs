@@ -102,6 +102,23 @@ pub fn token_at(line: &Line, pos: usize) -> Option<Range<usize>> {
     (!body.is_empty()).then(|| w.start..w.start + body.len())
 }
 
+/// What Enter follows: the name under the caret, else (the caret is on a
+/// mnemonic or blank) the first name on the line, as IDA does on a `call`.
+pub fn follow_token_at(line: &Line, pos: usize) -> Option<Range<usize>> {
+    if line
+        .run_at(pos)
+        .is_some_and(|r| tags::color::is_name(r.color))
+    {
+        return token_at(line, pos);
+    }
+    let first = line
+        .runs
+        .iter()
+        .find(|r| tags::color::is_name(r.color))
+        .and_then(|r| token_at(line, r.range.start));
+    first.or_else(|| token_at(line, pos))
+}
+
 /// Shapes a tagged line for painting.
 pub fn shape(
     window: &mut Window,

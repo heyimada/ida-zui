@@ -409,6 +409,24 @@ fn main() {
         !threads.is_empty() && threads.iter().any(|t| t.current),
         "threads are listed with a current one",
     );
+    check(
+        threads.iter().all(|t| t.ip != 0)
+            && threads.iter().filter(|t| t.current).all(|t| {
+                s.call(DbgRegs { all: false })
+                    .iter()
+                    .find(|r| r.ip)
+                    .and_then(DbgReg::value)
+                    == Some(t.ip)
+            }),
+        "every thread has an instruction pointer, the current one matches RIP",
+    );
+    check(
+        s.call(DbgThreads {}).iter().filter(|t| t.current).count() == 1
+            && s.call(DbgThreads {})
+                .iter()
+                .any(|t| t.current && t.tid == threads.iter().find(|x| x.current).unwrap().tid),
+        "reading every thread's pointer leaves the selection where it was",
+    );
     let mods = s.call(DbgModules {});
     check(
         mods.iter()

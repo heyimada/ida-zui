@@ -80,6 +80,7 @@ impl HostConfig {
         }
         let ida_dir = std::env::var_os("IDADIR")
             .map(PathBuf::from)
+            .or_else(ida_dir_setting)
             .or_else(find_ida_install)
             .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\IDA Professional"));
         Self {
@@ -91,10 +92,65 @@ impl HostConfig {
     }
 }
 
+static IDA_DIR_SETTING: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// The IDA folder the user picked ("Locate IDA..."); `IDADIR` still wins.
+pub fn set_ida_dir_setting(dir: Option<PathBuf>) {
+    *IDA_DIR_SETTING.write().unwrap() = dir;
+}
+
+fn ida_dir_setting() -> Option<PathBuf> {
+    IDA_DIR_SETTING
+        .read()
+        .unwrap()
+        .clone()
+        .filter(|d| is_ida_dir(d))
+}
+
+/// Whether `dir` is an IDA install idalib can run from.
+pub fn is_ida_dir(dir: &Path) -> bool {
+    dir.join("idalib.dll").is_file()
+}
+
+/// What stops a host from starting at all, found before trying.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetupProblem {
+    /// No IDA install with `idalib.dll` was found.
+    IdaMissing,
+    /// `ida-host.exe` is not where it should be.
+    HostMissing(PathBuf),
+}
+
+impl SetupProblem {
+    pub fn message(&self) -> String {
+        match self {
+            Self::IdaMissing => "IDA Pro with idalib was not found. ida-zui needs your own licensed IDA install (a folder that contains idalib.dll)."
+                .to_owned(),
+            Self::HostMissing(p) => format!(
+                "ida-host.exe is missing ({}). It must sit in the same folder as ida-zui.exe; extract the whole release zip or rebuild with `cargo build --workspace --bins`.",
+                p.display()
+            ),
+        }
+    }
+}
+
+impl HostConfig {
+    /// The first thing that would keep [`Client::spawn`] from working.
+    pub fn problem(&self) -> Option<SetupProblem> {
+        if !self.host_exe.is_file() {
+            Some(SetupProblem::HostMissing(self.host_exe.clone()))
+        } else if !is_ida_dir(&self.ida_dir) {
+            Some(SetupProblem::IdaMissing)
+        } else {
+            None
+        }
+    }
+}
+
 /// The newest IDA install that ships `idalib.dll`: a folder named
 /// `IDA Professional *`, `IDA Pro *` or `IDA *` under `%ProgramFiles%`.
 /// "Newest" compares the digit runs in the folder name numerically, so
-/// `IDA Professional 9.10` beats `IDA Professional 9.2`.
+/// `IDA Professional 10` beats `IDA Professional 9`.
 pub fn find_ida_install() -> Option<PathBuf> {
     let root = std::env::var_os("ProgramFiles")
         .map(PathBuf::from)

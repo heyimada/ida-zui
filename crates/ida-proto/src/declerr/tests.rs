@@ -181,3 +181,28 @@ fn the_same_token_in_an_earlier_declaration_is_not_blamed() {
     let got = locate_in(decl, span, "Syntax error near: unknown_t\n");
     assert_eq!(got[0].line, 1);
 }
+
+// IDA's parser accepts an unterminated `/*` silently (the rest of the text
+// becomes the comment), so the editor has to say so itself.
+
+#[test]
+fn an_unterminated_block_comment_is_reported_on_its_opening_line() {
+    let decl = "int a;\n/* never closed\nint b;\n";
+    let e = unterminated_comment(decl).expect("reported");
+    assert_eq!(e.line, 1);
+    assert!(e.message.contains("/*"));
+}
+
+#[test]
+fn closed_comments_and_slashes_in_line_comments_are_fine() {
+    assert!(unterminated_comment("/* ok */ int a; /* also */").is_none());
+    assert!(unterminated_comment("// see /* not a comment\nint a;").is_none());
+    assert!(unterminated_comment("int a;").is_none());
+}
+
+#[test]
+fn the_first_unterminated_comment_wins_when_comments_nest_textually() {
+    // C has no nested comments: the first `*/` closes the first `/*`.
+    let decl = "/* a /* b */ int x;\n/* open";
+    assert_eq!(unterminated_comment(decl).unwrap().line, 1);
+}

@@ -184,7 +184,7 @@ impl Theme {
         on_accent: 0x000000,
         accent_soft: 0x0b3552,
         ring: 0xffe14d,
-        selection: 0x1b4f78,
+        selection: 0x143b5c,
         caret_row: 0x14202c,
         hl: 0x5c4d00,
         danger: 0xff7b7b,
@@ -225,14 +225,14 @@ impl Theme {
         text: 0x000000,
         muted: 0x404040,
         faint: 0x555555,
-        accent: 0x316ac5,
+        accent: 0x1f4e9e,
         on_accent: 0xffffff,
         accent_soft: 0xcddcf3,
-        ring: 0x316ac5,
+        ring: 0x1f4e9e,
         selection: 0xc4d4ee,
         caret_row: 0xe0e8f8,
         hl: 0xffff80,
-        danger: 0xc00000,
+        danger: 0xb00000,
         danger_soft: 0xf6d5d5,
         success: 0x006400,
         success_soft: 0xd5ecd5,
@@ -244,7 +244,7 @@ impl Theme {
             insn: 0x000000,
             reg: 0x000080,
             num: 0x0000ff,
-            str: 0x008000,
+            str: 0x006000,
             cmt: 0x0000b0,
             sym: 0x000000,
             code_name: 0x000080,
@@ -252,7 +252,7 @@ impl Theme {
             imp_name: 0x800080,
             loc_name: 0x000080,
             kw: 0x000080,
-            ty: 0x008080,
+            ty: 0x005f5f,
         },
     };
 
@@ -375,4 +375,96 @@ pub fn code_font_size() -> f32 {
 /// Height of one code row: 20 px at the default 12 px code size.
 pub fn code_line_height() -> f32 {
     (code_font_size() * 5. / 3.).round()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lum(c: u32) -> f64 {
+        let ch = |shift: u32| {
+            let v = ((c >> shift) & 0xff) as f64 / 255.;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * ch(16) + 0.7152 * ch(8) + 0.0722 * ch(0)
+    }
+
+    /// WCAG contrast ratio of two 0xRRGGBB colours.
+    fn contrast(a: u32, b: u32) -> f64 {
+        let (la, lb) = (lum(a), lum(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    /// Every text token must read on every surface it can sit on: the two
+    /// themes that carry an accessibility promise (High contrast, and IDA
+    /// Classic's real colours) at 4.5:1 (7:1 for High contrast text).
+    #[test]
+    fn text_tokens_reach_their_contrast_on_every_surface() {
+        let mut failures = Vec::new();
+        for (t, floor) in [(Theme::HIGH_CONTRAST, 4.5), (Theme::IDA_CLASSIC, 4.5)] {
+            let grounds = [
+                ("bg", t.bg),
+                ("surface", t.surface),
+                ("surface2", t.surface2),
+                ("popover", t.popover),
+                ("raised", t.raised),
+                ("hover", t.hover),
+                ("selection", t.selection),
+                ("caret_row", t.caret_row),
+            ];
+            let s = t.syntax;
+            let texts = [
+                ("text", t.text),
+                ("muted", t.muted),
+                ("faint", t.faint),
+                ("accent", t.accent),
+                ("danger", t.danger),
+                ("success", t.success),
+                ("warning", t.warning),
+                ("insn", s.insn),
+                ("reg", s.reg),
+                ("num", s.num),
+                ("str", s.str),
+                ("cmt", s.cmt),
+                ("sym", s.sym),
+                ("code_name", s.code_name),
+                ("data_name", s.data_name),
+                ("imp_name", s.imp_name),
+                ("loc_name", s.loc_name),
+                ("kw", s.kw),
+                ("ty", s.ty),
+            ];
+            for (tn, tc) in texts {
+                for (gn, gc) in grounds {
+                    let r = contrast(tc, gc);
+                    if r < floor {
+                        failures.push(format!("{}: {tn} on {gn} = {r:.2}", t.name));
+                    }
+                }
+            }
+            // Text on fills that carry their own text colour.
+            for (label, fg, bg) in [
+                ("on_accent on accent", t.on_accent, t.accent),
+                ("danger on danger_soft", t.danger, t.danger_soft),
+                ("success on success_soft", t.success, t.success_soft),
+                ("warning on warning_soft", t.warning, t.warning_soft),
+                ("accent on accent_soft", t.accent, t.accent_soft),
+                ("text on hl", t.text, t.hl),
+            ] {
+                let r = contrast(fg, bg);
+                if r < floor {
+                    failures.push(format!("{}: {label} = {r:.2}", t.name));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "low contrast:\n{}",
+            failures.join("\n")
+        );
+    }
 }

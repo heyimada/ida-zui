@@ -33,7 +33,7 @@ fn format_label(file_type: &str) -> &'static str {
     }
 }
 
-fn arch_label(processor: &str, bitness: u32) -> String {
+pub fn arch_label(processor: &str, bitness: u32) -> String {
     match processor {
         "metapc" => {
             if bitness == 64 {
@@ -693,8 +693,10 @@ impl Workspace {
             div()
                 .id("jump")
                 .w(px(244.))
+                .min_w(px(120.))
                 .h(px(28.))
-                .flex_none()
+                .flex_shrink(1.)
+                .overflow_hidden()
                 .flex()
                 .items_center()
                 .gap(px(8.))
@@ -1057,6 +1059,9 @@ impl Workspace {
             .text_color(hsla(t.muted));
         if !ready {
             let loading = matches!(s.phase, Phase::Loading { .. });
+            let setup_problem = ida_proto::client::HostConfig::discover()
+                .problem()
+                .is_some();
             return bar
                 .child(div().child(if loading {
                     "Opening a database…"
@@ -1069,8 +1074,15 @@ impl Workspace {
                         .flex()
                         .items_center()
                         .gap(px(6.))
-                        .child(ui::dot(6., t.success))
-                        .child("idalib ready"),
+                        .child(ui::dot(
+                            6.,
+                            if setup_problem { t.danger } else { t.success },
+                        ))
+                        .child(if setup_problem {
+                            "IDA not found"
+                        } else {
+                            "idalib ready"
+                        }),
                 );
         }
         bar.child(
@@ -1173,7 +1185,7 @@ impl Workspace {
             _ => None,
         };
         let now = settings::unix_now();
-        let recent: Vec<(String, u64, Option<u64>)> = settings::get(cx)
+        let recent: Vec<(String, u64, Option<u64>, String)> = settings::get(cx)
             .recent
             .iter()
             .filter(|r| std::path::Path::new(&r.path).exists())
@@ -1182,10 +1194,12 @@ impl Workspace {
                     r.path.clone(),
                     r.opened,
                     std::fs::metadata(&r.path).ok().map(|m| m.len()),
+                    r.arch.clone(),
                 )
             })
             .collect();
         let open_hint = crate::actions::shortcut_text(&OpenFile, cx);
+        let problem = ida_proto::client::HostConfig::discover().problem();
         div()
             .size_full()
             .flex()
@@ -1228,6 +1242,39 @@ impl Workspace {
                                     .child(div().text_size(px(20.)).line_height(px(28.)).font_weight(gpui::FontWeight::MEDIUM).child("ida-zui")),
                             )
                             .child(div().text_size(px(13.)).text_color(hsla(t.muted)).child("A modern interface for IDA Pro databases."))
+                            .when_some(problem, |d, p| {
+                                let locate = p == ida_proto::client::SetupProblem::IdaMissing;
+                                d.child(
+                                    div()
+                                        .p(px(16.))
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(10.))
+                                        .rounded(px(8.))
+                                        .border_1()
+                                        .border_color(hsla(t.danger))
+                                        .bg(hsla(t.danger_soft))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(8.))
+                                                .text_color(hsla(t.danger))
+                                                .child(icon("warning", 16., hsla(t.danger)))
+                                                .child(div().text_size(px(14.)).font_weight(gpui::FontWeight::MEDIUM).child(if locate { "IDA Pro was not found" } else { "ida-host.exe was not found" })),
+                                        )
+                                        .child(div().text_size(px(12.)).line_height(px(18.)).child(p.message()))
+                                        .when(locate, |d| {
+                                            d.child(div().text_size(px(12.)).line_height(px(18.)).text_color(hsla(t.muted)).child("ida-zui looks for a folder named IDA * with idalib.dll under Program Files. Pick yours, or set the IDADIR environment variable (it takes precedence)."))
+                                                .child(
+                                                    div().flex().child(
+                                                        ui::button("locate-ida", "Locate IDA…", ui::ButtonKind::Primary, false, &t)
+                                                            .on_click(cx.listener(|w, _, window, cx| w.locate_ida(window, cx))),
+                                                    ),
+                                                )
+                                        }),
+                                )
+                            })
                             .child(
                                 div()
                                     .flex()
@@ -1279,7 +1326,7 @@ impl Workspace {
                                         .flex_col()
                                         .child(div().px(px(12.)).pb(px(8.)).child(ui::section_label("Recent", &t)))
                                         .child(div().h(px(1.)).bg(hsla(t.border)))
-                                        .children(recent.into_iter().enumerate().map(|(ix, (path, opened, size))| {
+                                        .children(recent.into_iter().enumerate().map(|(ix, (path, opened, size, arch))| {
                                             let p = std::path::Path::new(&path);
                                             let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                                             let dir = path.clone();
@@ -1312,6 +1359,7 @@ impl Workspace {
                                                                 .child(dir),
                                                         ),
                                                 )
+                                                .when(!arch.is_empty(), |d| d.child(ui::badge(arch.clone(), ui::BadgeKind::Neutral, &t)))
                                                 .children(size.map(|b| div().flex_none().font_family(code_font_name()).text_size(px(11.)).text_color(hsla(t.muted)).child(size_label(b))))
                                                 .child(div().flex_none().w(px(96.)).text_size(px(12.)).text_color(hsla(t.muted)).child(settings::ago(opened, now)))
                                         })),

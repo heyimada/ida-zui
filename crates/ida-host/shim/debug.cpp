@@ -959,12 +959,31 @@ int izs_dbg_threads(void)
   j.arr();
   thid_t cur = get_current_thread();
   int n = get_thread_qty();
+  bool suspended = get_process_state() == DSTATE_SUSP;
   for ( int i = 0; i < n; i++ )
   {
     thid_t tid = getn_thread(i);
     const char *nm = getn_thread_name(i);
-    j.obj().kv("tid", (uint64_t)tid).kv("name", nm != nullptr ? nm : "").kvb("current", tid == cur).end_obj();
+    // Each thread's instruction pointer: select it, read it, and put the
+    // selection back at the end.
+    uint64_t ip = 0;
+    if ( suspended && tid != cur && select_thread(tid) )
+    {
+      regval_t rv;
+      if ( get_ip_val(&rv.ival) )
+        ip = rv.ival;
+    }
+    else if ( suspended && tid == cur )
+    {
+      uval_t v = 0;
+      if ( get_ip_val(&v) )
+        ip = v;
+    }
+    j.obj().kv("tid", (uint64_t)tid).kv("name", nm != nullptr ? nm : "").kvb("current", tid == cur);
+    j.kv("ip", ip).end_obj();
   }
+  if ( suspended && n > 1 && get_current_thread() != cur )
+    select_thread(cur);
   j.end_arr();
   return ok(j);
   GUARD_END

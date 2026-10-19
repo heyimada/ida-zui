@@ -80,9 +80,12 @@ actions!(
         // search
         SearchBytes,
         SearchText,
+        SearchNextBytes,
+        SearchNextText,
         // database
         OpenFile,
         OpenWithOptions,
+        LocateIda,
         CloseDatabase,
         NextDatabase,
         PrevDatabase,
@@ -122,6 +125,7 @@ actions!(
         ShowRegisters,
         ShowStack,
         ShowMemory,
+        HexProcessMemory,
         ShowCallStack,
         ShowThreads,
         ShowModules,
@@ -197,14 +201,14 @@ pub fn catalog() -> &'static [Command] {
             cmd!(PageDown, "Navigation", "Page down", db: true, palette: false, "", &[("pagedown", CV)]),
             cmd!(Top, "Navigation", "Go to start", db: true, palette: false, "", &[("ctrl-home", CV)]),
             cmd!(Bottom, "Navigation", "Go to end", db: true, palette: false, "", &[("ctrl-end", CV)]),
-            cmd!(XrefsTo, "Navigation", "Cross references to", db: true, palette: true, "xrefs xref references callers usages", &[("x", CV)]),
-            cmd!(XrefsFrom, "Navigation", "Cross references from", db: true, palette: true, "xrefs xref references callees", &[("shift-x", CV)]),
+            cmd!(XrefsTo, "Navigation", "Cross references to", db: true, palette: true, "xrefs xref references callers usages", &[("x", CV), ("ctrl-x", CV)]),
+            cmd!(XrefsFrom, "Navigation", "Cross references from", db: true, palette: true, "xrefs xref references callees", &[("ctrl-j", CV), ("shift-x", CV)]),
             cmd!(ToggleGraph, "Views", "Toggle graph / linear view", db: true, palette: true, "cfg flow chart blocks", &[("space", CV)]),
             cmd!(ShowGraph, "Views", "Show graph view", db: true, palette: true, "cfg flow chart blocks", &[]),
             cmd!(TogglePseudocode, "Views", "Toggle pseudocode", db: true, palette: true, "decompile hex-rays f5 c code", &[("tab", CV), ("f5", WS)]),
             cmd!(ShowHex, "Views", "Show hex view", db: true, palette: true, "bytes dump memory", &[("ctrl-shift-h", WS)]),
             cmd!(ShowListing, "Views", "Show disassembly", db: true, palette: true, "listing linear assembly", &[("ctrl-shift-d", WS)]),
-            cmd!(FocusSidebar, "Views", "Focus side panel", db: true, palette: true, "filter lists", &[("ctrl-b", WS)]),
+            cmd!(FocusSidebar, "Views", "Focus side panel", db: true, palette: true, "filter lists", &[("ctrl-shift-b", WS)]),
             cmd!(ToggleSidebar, "Views", "Show / hide side panel", db: true, palette: true, "lists", &[]),
             cmd!(ToggleOutput, "Views", "Toggle output panel", db: true, palette: true, "log messages console", &[("ctrl-`", WS)]),
             cmd!(ToggleBottomPanel, "Views", "Show / hide bottom panel", db: true, palette: true, "output xrefs panel", &[("ctrl-alt-j", WS)]),
@@ -218,12 +222,12 @@ pub fn catalog() -> &'static [Command] {
             cmd!(ZoomOut, "Views", "Zoom out", db: true, palette: true, "graph smaller", &[("ctrl--", CV)]),
             cmd!(ZoomReset, "Views", "Reset zoom", db: true, palette: true, "graph", &[("ctrl-0", CV)]),
             cmd!(ToggleMinimap, "Views", "Show / hide graph minimap", db: true, palette: true, "graph overview map", &[]),
-            cmd!(ShowFunctions, "Windows", "Functions", db: true, palette: true, "side panel list", &[]),
-            cmd!(ShowNames, "Windows", "Names", db: true, palette: true, "side panel list symbols", &[]),
-            cmd!(ShowStrings, "Windows", "Strings", db: true, palette: true, "side panel list", &[]),
+            cmd!(ShowFunctions, "Windows", "Functions", db: true, palette: true, "side panel list", &[("shift-f3", WS)]),
+            cmd!(ShowNames, "Windows", "Names", db: true, palette: true, "side panel list symbols", &[("shift-f4", WS)]),
+            cmd!(ShowStrings, "Windows", "Strings", db: true, palette: true, "side panel list", &[("shift-f12", WS)]),
             cmd!(ShowImports, "Windows", "Imports", db: true, palette: true, "side panel list", &[]),
             cmd!(ShowExports, "Windows", "Exports", db: true, palette: true, "side panel list entry points", &[]),
-            cmd!(ShowSegments, "Windows", "Segments", db: true, palette: true, "side panel list sections", &[]),
+            cmd!(ShowSegments, "Windows", "Segments", db: true, palette: true, "side panel list sections", &[("shift-f7", WS)]),
             cmd!(ShowTypes, "Windows", "Types", db: true, palette: true, "side panel list structures local types", &[]),
             cmd!(ShowLocalTypes, "Windows", "Local types", db: true, palette: true, "structures unions enums typedef declarations editor", &[("shift-f1", WS)]),
             cmd!(ShowStructures, "Windows", "Structures…", db: true, palette: true, "struct union members fields editor", &[("shift-f9", WS)]),
@@ -250,6 +254,7 @@ pub fn catalog() -> &'static [Command] {
             cmd!(ShowBreakpoints, "Debugger", "Breakpoint list", db: true, palette: true, "debug bpt breakpoints panel", &[("ctrl-alt-b", WS)]),
             cmd!(ShowRegisters, "Debugger", "Registers", db: true, palette: true, "debug cpu flags panel", &[]),
             cmd!(ShowStack, "Debugger", "Stack", db: true, palette: true, "debug rsp esp panel", &[]),
+            cmd!(HexProcessMemory, "Debugger", "Hex view: process memory (toggle)", db: true, palette: true, "refresh memory process snapshot dump live", &[]),
             cmd!(ShowMemory, "Debugger", "Memory", db: true, palette: true, "debug dump hex process panel", &[]),
             cmd!(ShowCallStack, "Debugger", "Call stack", db: true, palette: true, "debug backtrace frames panel", &[]),
             cmd!(ShowThreads, "Debugger", "Threads", db: true, palette: true, "debug panel", &[]),
@@ -260,8 +265,8 @@ pub fn catalog() -> &'static [Command] {
             cmd!(AddField, "Editing", "Add field / member", db: true, palette: true, "structure enum frame variable insert", &[("insert", CV)]),
             cmd!(DeleteMember, "Editing", "Delete member", db: true, palette: true, "structure enum frame variable remove", &[("delete", CV)]),
             cmd!(Rename, "Editing", "Rename", db: true, palette: true, "name label symbol", &[("n", CV)]),
-            cmd!(Comment, "Editing", "Comment", db: true, palette: true, "note", &[(";", CV)]),
-            cmd!(RepeatableComment, "Editing", "Repeatable comment", db: true, palette: true, "note", &[("shift-;", CV)]),
+            cmd!(Comment, "Editing", "Comment", db: true, palette: true, "note", &[("shift-;", CV)]),
+            cmd!(RepeatableComment, "Editing", "Repeatable comment", db: true, palette: true, "note", &[(";", CV)]),
             cmd!(SetType, "Editing", "Set type", db: true, palette: true, "prototype signature declaration", &[("y", CV)]),
             cmd!(MakeCode, "Editing", "Make code", db: true, palette: true, "disassemble convert", &[("c", CV)]),
             cmd!(MakeData, "Editing", "Make data (cycle size)", db: true, palette: true, "byte word dword qword define", &[("d", CV)]),
@@ -272,8 +277,11 @@ pub fn catalog() -> &'static [Command] {
             cmd!(ToggleCollapse, "Editing", "Expand / collapse", db: true, palette: true, "unhide hide fold", &[("-", CV)]),
             cmd!(SearchBytes, "Search", "Search bytes", db: true, palette: true, "binary pattern find", &[("alt-b", WS)]),
             cmd!(SearchText, "Search", "Search text", db: true, palette: true, "string find", &[("alt-t", WS)]),
+            cmd!(SearchNextBytes, "Search", "Search bytes again", db: true, palette: true, "binary pattern find next repeat", &[("ctrl-b", WS)]),
+            cmd!(SearchNextText, "Search", "Search text again", db: true, palette: true, "string find next repeat", &[("ctrl-t", WS)]),
             cmd!(OpenFile, "File", "Open file", db: false, palette: true, "load binary idb i64", &[("ctrl-o", WS)]),
             cmd!(OpenWithOptions, "File", "Open file with options", db: false, palette: true, "loader processor raw binary base address", &[("ctrl-shift-o", WS)]),
+            cmd!(LocateIda, "File", "Locate IDA installation", db: false, palette: true, "ida folder idalib path setup", &[]),
             cmd!(CloseDatabase, "File", "Close database", db: true, palette: true, "unload", &[("ctrl-w", WS)]),
             cmd!(NextDatabase, "Databases", "Next database", db: false, palette: true, "tab window switch cycle", &[("ctrl-tab", WS)]),
             cmd!(PrevDatabase, "Databases", "Previous database", db: false, palette: true, "tab window switch cycle", &[("ctrl-shift-tab", WS)]),
@@ -554,10 +562,10 @@ mod tests {
     #[test]
     fn conflicts_see_overrides_and_spelling_variants() {
         let mut user = BTreeMap::new();
-        user.insert("ida::Rename".to_owned(), vec!["ctrl-j".to_owned()]);
-        // Ctrl+J is now Rename's, however it is written.
+        user.insert("ida::Rename".to_owned(), vec!["ctrl-alt-r".to_owned()]);
+        // Ctrl+Alt+R is now Rename's, however it is written.
         assert_eq!(
-            conflict("ida::Save", "ctrl-j", &user).map(|c| c.name),
+            conflict("ida::Save", "ctrl-alt-r", &user).map(|c| c.name),
             Some("ida::Rename")
         );
         // Rename's old key is free.

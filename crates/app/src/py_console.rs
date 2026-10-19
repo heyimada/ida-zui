@@ -32,6 +32,8 @@ const MAX_INPUT_ROWS: usize = 8;
 enum Kind {
     /// An echoed input line; the flag marks the first line of a command.
     Input(bool),
+    /// An echoed IDC input line.
+    IdcInput(bool),
     Out,
     Err,
     /// The printed value of a trailing expression.
@@ -49,8 +51,19 @@ struct Line {
     open: bool,
 }
 
+/// How long after Cancel a script may keep running before "Kill host" shows.
+const KILL_OFFER_AFTER: Duration = Duration::from_secs(4);
+
 struct Running {
     started: Instant,
+    /// When Cancel was pressed; a script that ignores it for a while (it is
+    /// inside a long C call) gets a "Kill host" button.
+    cancelled: Option<Instant>,
+    /// The first click on "Kill host" asks again before killing.
+    kill_armed: bool,
+    /// An IDC statement: its messages stream in as IDA's log lines, and the
+    /// reply must not replace them.
+    idc: bool,
     /// The input, until it has been echoed: it is echoed with the first
     /// streamed output (a statement that turns out incomplete never is).
     echo: Option<String>,
@@ -79,6 +92,8 @@ pub struct PyConsole {
     lines: Rc<Vec<Line>>,
     scroll: UniformListScrollHandle,
     running: Option<Running>,
+    /// The input is IDC (IDA's own script language) rather than Python.
+    pub idc: bool,
     history: Rc<RefCell<History>>,
     /// Theme and code font the input was last styled with.
     style: (&'static str, SharedString, u32),
@@ -172,10 +187,33 @@ impl PyConsole {
             lines: Rc::default(),
             scroll: UniformListScrollHandle::new(),
             running: None,
+            idc: false,
             history,
             style: (theme.name, code_font_name(), code_font_size().to_bits()),
             _subs: subs,
         }
+    }
+
+    /// Switches the console between Python and IDC.
+    pub fn toggle_language(&mut self, cx: &mut Context<Self>) {
+        if self.running.is_some() {
+            return;
+        }
+        self.idc = !self.idc;
+        self.completions = None;
+        let note = if self.idc {
+            "IDC: an expression, or statements ending in ;  (Message() output shows as IDA's log)"
+        } else {
+            "Python"
+        };
+        self.push_text(
+            Kind::Note,
+            &format!(
+                "{note}
+"
+            ),
+        );
+        cx.notify();
     }
 
     pub fn is_running(&self) -> bool {
@@ -319,13 +357,21 @@ impl PyConsole {
         let ea = self.session.read(cx).cursor;
         self.running = Some(Running {
             started: Instant::now(),
+            cancelled: None,
+            kill_armed: false,
+            idc: self.idc,
             echo: Some(source.clone()),
             out_mark: None,
             file: false,
         });
         self.session.update(cx, |s, cx| s.python_started(cx));
+        let (wire, force) = if self.idc {
+            (idc_source(&source), true)
+        } else {
+            (source.clone(), force)
+        };
         let fut = self.session.read(cx).call(PyEval {
-            source: source.clone(),
+            source: wire,
             ea,
             force,
         });
@@ -357,6 +403,9 @@ impl PyConsole {
         let ea = self.session.read(cx).cursor;
         self.running = Some(Running {
             started: Instant::now(),
+            cancelled: None,
+            kill_armed: false,
+            idc: false,
             echo: None,
             out_mark: None,
             file: true,
@@ -409,7 +458,7 @@ impl PyConsole {
     ) {
         let run = self.running.take();
         // Streamed lines give way to the reply's typed output.
-        if let Some(mark) = run.as_ref().and_then(|r| r.out_mark) {
+        if let Some(mark) = run.as_ref().filter(|r| !r.idc).and_then(|r| r.out_mark) {
             let keep = mark.min(self.lines.len());
             Rc::make_mut(&mut self.lines).truncate(keep);
         }
@@ -480,7 +529,11 @@ impl PyConsole {
         let lines = Rc::make_mut(&mut self.lines);
         for (i, l) in source.trim_end().split('\n').enumerate() {
             lines.push(Line {
-                kind: Kind::Input(i == 0),
+                kind: if self.idc {
+                    Kind::IdcInput(i == 0)
+                } else {
+                    Kind::Input(i == 0)
+                },
                 text: l.replace('\t', "    "),
                 open: false,
             });
@@ -540,6 +593,9 @@ impl PyConsole {
             return;
         }
         self.push_text(Kind::Note, "Interrupt sent\n");
+        if let Some(r) = self.running.as_mut() {
+            r.cancelled.get_or_insert_with(Instant::now);
+        }
         let fut = self.session.read(cx).call(Interrupt {});
         cx.spawn(async move |this, cx| {
             if let Err(e) = fut.await {
@@ -551,6 +607,22 @@ impl PyConsole {
             }
         })
         .detach();
+        cx.notify();
+    }
+
+    /// "Kill host": the script ignored Cancel. The first click asks again
+    /// (unsaved changes are lost), the second ends the host process.
+    fn kill_host(&mut self, cx: &mut Context<Self>) {
+        let Some(r) = self.running.as_mut() else {
+            return;
+        };
+        if !r.kill_armed {
+            r.kill_armed = true;
+            cx.notify();
+            return;
+        }
+        self.push_text(Kind::Err, "Host killed.\n");
+        self.session.update(cx, |s, cx| s.kill_host(cx));
         cx.notify();
     }
 
@@ -590,6 +662,7 @@ impl Render for PyConsole {
                     let l = &lines[ix];
                     let (gutter, color) = match l.kind {
                         Kind::Input(first) => (if first { ">>>" } else { "..." }, t.muted),
+                        Kind::IdcInput(first) => (if first { "idc" } else { "..." }, t.muted),
                         Kind::Out => ("", t.text),
                         Kind::Err => ("", t.warning),
                         Kind::Result => ("", t.syntax.code_name),
@@ -611,11 +684,13 @@ impl Render for PyConsole {
                             div()
                                 .w(px(36.))
                                 .flex_none()
-                                .text_color(hsla(if matches!(l.kind, Kind::Input(true)) {
-                                    t.accent
-                                } else {
-                                    t.faint
-                                }))
+                                .text_color(hsla(
+                                    if matches!(l.kind, Kind::Input(true) | Kind::IdcInput(true)) {
+                                        t.accent
+                                    } else {
+                                        t.faint
+                                    },
+                                ))
                                 .child(gutter),
                         )
                         .child(
@@ -642,7 +717,10 @@ impl Render for PyConsole {
             cx,
         );
         let rows = self.input.read(cx).line_count().clamp(1, MAX_INPUT_ROWS);
-        let running = self.running.as_ref().map(|r| (r.started.elapsed(), r.file));
+        let running = self.running.as_ref().map(|r| {
+            let stuck = r.cancelled.is_some_and(|c| c.elapsed() > KILL_OFFER_AFTER);
+            (r.started.elapsed(), r.file, stuck, r.kill_armed)
+        });
         let ready = matches!(self.session.read(cx).phase, Phase::Ready);
         div()
             .size_full()
@@ -690,14 +768,18 @@ impl Render for PyConsole {
                             .text_size(px(12.))
                             .text_color(hsla(t.faint))
                             .child(if ready {
-                                "IDAPython. Enter runs, Shift+Enter adds a line, Ctrl+Enter forces a run."
+                                if self.idc {
+                                    "IDC. Enter runs, Shift+Enter adds a line. Switch back to Python with the language button."
+                                } else {
+                                    "IDAPython. Enter runs, Shift+Enter adds a line, Ctrl+Enter forces a run."
+                                }
                             } else {
                                 "Open a database to use the console."
                             }),
                     )
                 }),
             )
-            .when_some(running, |d, (elapsed, file)| {
+            .when_some(running, |d, (elapsed, file, stuck, armed)| {
                 d.child(
                     div()
                         .h(px(28.))
@@ -714,7 +796,19 @@ impl Render for PyConsole {
                         .child(div().text_color(hsla(t.text)).child(if file { "Running script" } else { "Running" }))
                         .child(ui::mono_note(elapsed_text(elapsed), &t))
                         .child(div().flex_1())
-                        .child(div().text_color(hsla(t.muted)).child("The database is busy until it returns"))
+                        .child(div().text_color(hsla(t.muted)).child(if armed {
+                            "Unsaved changes in this database will be lost"
+                        } else if stuck {
+                            "Cancel only works between Python steps; this call has not returned"
+                        } else {
+                            "The database is busy until it returns"
+                        }))
+                        .when(stuck, |d| {
+                            d.child(
+                                ui::button("py-kill", if armed { "Kill host now" } else { "Kill host…" }, ButtonKind::Danger, true, &t)
+                                    .on_click(cx.listener(|c, _, _, cx| c.kill_host(cx))),
+                            )
+                        })
                         .child(ui::button("py-cancel", "Cancel", ButtonKind::Danger, true, &t).on_click(cx.listener(|c, _, _, cx| c.cancel(cx)))),
                 )
             })
@@ -737,7 +831,7 @@ impl Render for PyConsole {
                             .text_size(px(code_font_size()))
                             .line_height(px(lh))
                             .text_color(hsla(if self.running.is_some() { t.faint } else { t.accent }))
-                            .child(">>>"),
+                            .child(if self.idc { "idc" } else { ">>>" }),
                     )
                     .child(div().flex_1().min_w_0().h(px(lh * rows as f32 + 8.)).py(px(4.)).child(self.input.clone())),
             )
@@ -780,6 +874,49 @@ fn common_prefix(items: &[String]) -> String {
     }
     first[..len].to_owned()
 }
+
+/// The Python that runs `source` as IDC through IDA's own evaluator: first as
+/// an expression (the value is printed), else as statements.
+fn idc_source(source: &str) -> String {
+    let literal = serde_json::to_string(source).unwrap_or_else(|_| "\"\"".to_owned());
+    format!("{IDC_RUNNER}\n_izs_idc({literal})\n")
+}
+
+const IDC_RUNNER: &str = r#"import ida_expr as _e, ida_idaapi as _i, sys as _s
+class _R:
+    def __init__(self, t): self.t = t
+    def __repr__(self): return self.t
+def _izs_idc(src):
+    def err(r):
+        if isinstance(r, tuple):
+            return "" if r[0] else (r[1] or "error")
+        if isinstance(r, bool):
+            return "" if r else "syntax error"
+        return r or ""
+    def fmt(rv):
+        t = rv.vtype
+        if t == _e.VT_STR:
+            return '"' + rv.c_str() + '"'
+        if t == _e.VT_FLOAT:
+            return repr(rv.e)
+        n = rv.i64 if t == _e.VT_INT64 else rv.num
+        return "%d (0x%X)" % (n, n & 0xFFFFFFFFFFFFFFFF)
+    rv = _e.idc_value_t()
+    e = err(_e.eval_idc_expr(rv, _i.BADADDR, src))
+    if not e:
+        return _R(fmt(rv))
+    c = _e.compile_idc_snippet("_izs_snip", src)
+    c = "syntax error" if c is None else err(c)
+    if c:
+        plain = ";" not in src and "{" not in src
+        _s.stderr.write("IDC: " + (e if plain else c) + "\n")
+        return None
+    rv = _e.idc_value_t()
+    r = err(_e.eval_idc_expr(rv, _i.BADADDR, "_izs_snip()"))
+    if r:
+        _s.stderr.write("IDC: " + r + "\n")
+    return None
+"#;
 
 #[cfg(test)]
 mod tests {
