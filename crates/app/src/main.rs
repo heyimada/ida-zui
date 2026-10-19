@@ -9,6 +9,7 @@ mod bottom;
 mod code;
 mod commands;
 mod database;
+mod debugger;
 mod decl_names;
 mod dialog;
 mod docs;

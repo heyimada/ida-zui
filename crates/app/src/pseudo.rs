@@ -20,6 +20,8 @@ pub struct PseudoView {
     func: Option<Ea>,
     name: SharedString,
     lines: Vec<Line>,
+    /// Per line, the addresses of its ctree items (see `Pseudocode`).
+    line_eas: Vec<Vec<Ea>>,
     error: Option<SharedString>,
     top: f32,
     cursor: usize,
@@ -51,9 +53,11 @@ impl PseudoView {
                     this.load(f, true, cx);
                 }
             }
+            SessionEvent::DebugChanged => cx.notify(),
             SessionEvent::Closed => {
                 this.func = None;
                 this.lines.clear();
+                this.line_eas.clear();
                 cx.notify();
             }
             _ => {}
@@ -64,6 +68,7 @@ impl PseudoView {
             func: None,
             name: SharedString::default(),
             lines: Vec::new(),
+            line_eas: Vec::new(),
             error: None,
             top: 0.,
             cursor: 0,
@@ -129,6 +134,7 @@ impl PseudoView {
                         v.name = pc.name.into();
                         v.error = pc.error.map(Into::into);
                         v.lines = pc.lines.iter().map(|l| tags::parse(l)).collect();
+                        v.line_eas = pc.line_eas;
                         if !keep_scroll {
                             v.top = 0.;
                             v.cursor = 0;
@@ -298,6 +304,17 @@ impl PseudoView {
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        // A click in the marker gutter sets or clears a breakpoint on the line.
+        if let Some(row) = self.hit.gutter_row(ev.position) {
+            let ea = self
+                .line_eas
+                .get(row)
+                .and_then(|eas| crate::debugger::line_bpt_ea(eas));
+            if let Some(ea) = ea {
+                self.session.update(cx, |s, cx| s.dbg_toggle_bpt(ea, cx));
+            }
+            return;
+        }
         let Some((row, col)) = self.hit.hit(ev.position) else {
             return;
         };
@@ -328,10 +345,38 @@ impl PseudoView {
                 let end = (first + visible).min(view.lines.len());
                 let lines: Vec<(usize, Line)> =
                     (first..end).map(|i| (i, view.lines[i].clone())).collect();
+                // Breakpoints and the instruction pointer, per line.
+                let marks = code::DebugMarks::read(view.session.read(cx));
+                let in_func = marks.ip.is_some_and(|ip| {
+                    view.session.read(cx).function_at(ip).map(|f| f.start) == view.func
+                });
+                // The line of an instruction: the closest statement at or before
+                // it, or the first one when it precedes them all (the prologue).
+                let session = view.session.read(cx);
+                let row_of = |ea: Ea| {
+                    crate::debugger::ip_line(&view.line_eas, ea)
+                        .or_else(|| view.line_eas.iter().position(|e| !e.is_empty()))
+                };
+                let ip_row = marks.ip.filter(|_| in_func).and_then(row_of);
+                let bpt_rows: Vec<(usize, bool)> = marks
+                    .bpts
+                    .iter()
+                    .filter(|(ea, _)| session.function_at(*ea).map(|f| f.start) == view.func)
+                    .filter_map(|(ea, on)| Some((row_of(*ea)?, *on)))
+                    .collect();
+                let line_state = |i: usize| -> Option<bool> {
+                    let on: Vec<bool> = bpt_rows
+                        .iter()
+                        .filter(|(r, _)| *r == i)
+                        .map(|(_, on)| *on)
+                        .collect();
+                    (!on.is_empty()).then(|| on.contains(&true))
+                };
+                let states: Vec<Option<bool>> = (first..end).map(line_state).collect();
                 let cursor = view.cursor;
                 let highlight = view.highlight.clone();
                 let focused = view.focus.is_focused(window);
-                let text_x = bounds.left() + px(56.) - px(view.scroll_x);
+                let text_x = bounds.left() + px(64.) - px(view.scroll_x);
                 let widest = lines
                     .iter()
                     .map(|(_, l)| l.text.chars().count())
@@ -346,8 +391,17 @@ impl PseudoView {
                 window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
                     for (k, (i, line)) in lines.into_iter().enumerate() {
                         let y = bounds.top() + px((k as f32 - frac) * line_height());
+                        let bpt = states[k];
+                        let at_ip = ip_row == Some(i);
+                        if at_ip {
+                            code::paint_row_bg(bounds, y, hsla(theme.accent_soft), window);
+                        } else if bpt == Some(true) {
+                            code::paint_row_bg(bounds, y, hsla(theme.danger_soft), window);
+                        }
                         if i == cursor {
-                            code::paint_row_bg(bounds, y, hsla(theme.caret_row), window);
+                            if !at_ip && bpt != Some(true) {
+                                code::paint_row_bg(bounds, y, hsla(theme.caret_row), window);
+                            }
                             if focused {
                                 window.paint_quad(gpui::fill(
                                     gpui::Bounds::new(
@@ -360,7 +414,7 @@ impl PseudoView {
                         }
                         let shaped = code::shape(window, &line, &theme, highlight.as_deref());
                         let text_bounds = gpui::Bounds::from_corners(
-                            point(bounds.left() + px(56.), bounds.top()),
+                            point(bounds.left() + px(64.), bounds.top()),
                             bounds.bottom_right(),
                         );
                         window.with_content_mask(
@@ -382,9 +436,18 @@ impl PseudoView {
                         );
                         code::paint_shaped(
                             &num,
-                            point(bounds.left() + px(40.) - num.width, y),
+                            point(bounds.left() + px(58.) - num.width, y),
                             window,
                             cx,
+                        );
+                        code::paint_marks(
+                            bpt,
+                            at_ip,
+                            bounds.left(),
+                            y,
+                            px(line_height()),
+                            &theme,
+                            window,
                         );
                         hit.rows.push((i, y, shaped));
                     }
@@ -393,7 +456,7 @@ impl PseudoView {
                 entity.update(cx, |v, _| {
                     v.hit = hit;
                     v.viewport_rows = viewport.max(1);
-                    v.text_w = (f32::from(bounds.size.width) - 56.).max(0.);
+                    v.text_w = (f32::from(bounds.size.width) - 64.).max(0.);
                     v.content_w = widest * cw;
                 });
             },

@@ -32,6 +32,7 @@
 #include <string>
 
 #include "common.hpp"
+#include "debug.hpp"
 #include "events.hpp"
 
 std::string short_name(ea_t ea)
@@ -158,6 +159,7 @@ static int db_info()
   j.kv("bitness", (uint64_t)(inf_is_64bit() ? 64 : inf_is_32bit_exactly() ? 32 : 16));
   j.kv("min_ea", (uint64_t)inf_get_min_ea());
   j.kv("max_ea", (uint64_t)inf_get_max_ea());
+  j.kv("image_base", (uint64_t)get_imagebase());
   ea_t start = inf_get_start_ea();
   j.key("entry").opt_u64(start, BADADDR);
   j.kvb("hexrays", g_hexrays);
@@ -252,6 +254,11 @@ int izs_save(void)
 {
   REQUIRE_DB();
   GUARD_BEGIN
+  // A database rebased to the debuggee must never reach the disk.
+  if ( dbg_process_alive() )
+    return fail("a debugging session is active; terminate it before saving");
+  if ( dbg_db_rebased() )
+    return fail("the database is rebased to a debuggee; not saving");
   if ( !save_database(nullptr, 0) )
     return fail("save_database failed");
   return ok_null();
@@ -276,6 +283,9 @@ void izs_close(bool save)
 {
   if ( g_open )
   {
+    // End a debugging session first: it leaves the database rebased.
+    if ( !dbg_shutdown() )
+      save = false;
     if ( g_hexrays )
       term_hexrays_plugin();
     ev_unhook_idb();
@@ -631,6 +641,43 @@ int izs_decompile(ea_t ea)
     const strvec_t &sv = cf->get_pseudocode();
     for ( const simpleline_t &sl : sv )
       j.str(qs(sl.line));
+  }
+  j.end_arr();
+  // The addresses of the ctree items on each line (from the item anchors in
+  // the tagged text), for breakpoint and instruction pointer markers.
+  j.key("line_eas").arr();
+  if ( cf != nullptr )
+  {
+    const strvec_t &sv = cf->get_pseudocode();
+    for ( const simpleline_t &sl : sv )
+    {
+      std::vector<uint64_t> eas;
+      const char *p = sl.line.c_str();
+      const size_t digits = COLOR_ADDR_SIZE;
+      while ( *p != '\0' )
+      {
+        if ( *p == COLOR_ON && p[1] == COLOR_ADDR && strlen(p + 2) >= digits )
+        {
+          char buf[32];
+          qstrncpy(buf, p + 2, digits + 1);
+          uint32 value = (uint32)strtoull(buf, nullptr, 16);
+          uint32 index = value & ANCHOR_INDEX;
+          if ( (value & ANCHOR_MASK) == ANCHOR_CITEM && index < cf->treeitems.size() )
+          {
+            ea_t at = cf->treeitems[index]->ea;
+            if ( at != BADADDR && std::find(eas.begin(), eas.end(), (uint64_t)at) == eas.end() )
+              eas.push_back(at);
+          }
+          p += 2 + digits;
+        }
+        else
+          p++;
+      }
+      j.arr();
+      for ( uint64_t e : eas )
+        j.u64(e);
+      j.end_arr();
+    }
   }
   j.end_arr();
   if ( cf == nullptr )

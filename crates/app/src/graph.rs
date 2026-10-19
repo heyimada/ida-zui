@@ -95,6 +95,7 @@ impl GraphView {
                     this.load(f, true, cx);
                 }
             }
+            SessionEvent::DebugChanged => cx.notify(),
             SessionEvent::Closed => {
                 this.func = None;
                 this.blocks.clear();
@@ -376,10 +377,32 @@ impl GraphView {
         self.session.update(cx, |s, cx| s.set_caret(caret, cx));
     }
 
+    /// The instruction under a click in the margin left of a block, where the
+    /// breakpoint dots sit.
+    fn gutter_ea(&self, p: Point<Pixels>) -> Option<Ea> {
+        let b = self.bounds?;
+        let (_, gy) = self.to_graph(p)?;
+        for (bi, r) in self.layout.nodes.iter().enumerate() {
+            let left = b.left() + self.pan.x + px(r.x * self.zoom);
+            if p.x >= left - px(code::MARK_W) && p.x < left && gy >= r.y && gy <= r.bottom() {
+                let li = ((gy - r.y - HEAD - PAD) / lh()).floor();
+                if li < 0. {
+                    return None;
+                }
+                return self.blocks.get(bi)?.lines.get(li as usize).map(|l| l.0);
+            }
+        }
+        None
+    }
+
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         if self.minimap_click(ev.position) {
             cx.notify();
+            return;
+        }
+        if let Some(ea) = self.gutter_ea(ev.position) {
+            self.session.update(cx, |s, cx| s.dbg_toggle_bpt(ea, cx));
             return;
         }
         match self.hit(ev.position) {
@@ -597,6 +620,7 @@ impl GraphView {
                 let pan = v.pan;
                 let layout = v.layout.clone();
                 let kinds = v.edge_kinds.clone();
+                let marks = code::DebugMarks::read(v.session.read(cx));
                 let cursor = v.cursor;
                 let highlight = v.highlight.clone();
                 let focused = v.focus.is_focused(window);
@@ -694,12 +718,30 @@ impl GraphView {
                                 cx,
                             );
                         }
-                        for (li, (_, line)) in lines.iter().enumerate() {
+                        for (li, (lea, line)) in lines.iter().enumerate() {
                             let y = origin.y + px((HEAD + PAD + li as f32 * lh()) * zoom);
                             if y + px(line_h) < bounds.top() || y > bounds.bottom() {
                                 continue;
                             }
-                            if cursor == Some((bi, li)) {
+                            let marked = marks.row_bg(*lea, &theme);
+                            if let Some(bg) = marked {
+                                window.paint_quad(gpui::fill(
+                                    Bounds::new(
+                                        point(origin.x + px(1.), y),
+                                        size(rect.size.width - px(2.), px(line_h)),
+                                    ),
+                                    bg,
+                                ));
+                            }
+                            marks.paint_at(
+                                *lea,
+                                origin.x - px(code::MARK_W),
+                                y,
+                                px(line_h),
+                                &theme,
+                                window,
+                            );
+                            if marked.is_none() && cursor == Some((bi, li)) {
                                 window.paint_quad(gpui::fill(
                                     Bounds::new(
                                         point(origin.x + px(1.), y),

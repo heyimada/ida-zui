@@ -2,6 +2,7 @@
 // pieces (title strip, toolbar, rail, tab strip, status bar, welcome) are in
 // `chrome`; the panels are entities of their own.
 mod chrome;
+mod debug;
 
 use crate::actions::*;
 use crate::bottom::{BottomEvent, BottomPanel, BottomTab};
@@ -38,8 +39,8 @@ use gpui::{
     PathPromptOptions, SharedString, Subscription, Window, div, prelude::*, px,
 };
 use ida_proto::{
-    Ea, FindBytes, FindText, Lumina, LuminaAction, LuminaStatus, PluginList, PluginRun, XrefsFrom,
-    XrefsTo,
+    Ea, FindBytes, FindText, Lumina, LuminaAction, LuminaStatus, PluginList, PluginRun, ResumeHow,
+    XrefsFrom, XrefsTo,
 };
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
@@ -50,6 +51,8 @@ enum ModalKind {
     Prompt(SubmitFn),
     Goto,
     Pick,
+    /// A list of processes; the pick is a pid.
+    Attach,
 }
 
 /// The panel edge being dragged.
@@ -281,6 +284,7 @@ impl Workspace {
                 self.show_xref_list(title.clone(), rows.clone(), window, cx)
             }
             SessionEvent::OpenDoc(key) if active => self.open_doc(key.clone(), window, cx),
+            SessionEvent::DebugStopped => self.on_debug_stopped(ix, cx),
             SessionEvent::Closed => {
                 self.clear_docs(ix, window, cx);
                 if active {
@@ -380,12 +384,15 @@ impl Workspace {
         cx.notify();
     }
 
-    fn view_state(&self) -> ViewState {
+    fn view_state(&self, cx: &App) -> ViewState {
+        let dbg = &self.session.read(cx).dbg;
         ViewState {
             sidebar: self.show_sidebar,
             inspector: self.show_inspector,
             bottom: self.show_bottom,
             split: self.split,
+            debug_active: dbg.active(),
+            debug_suspended: dbg.suspended(),
         }
     }
 
@@ -1488,6 +1495,11 @@ impl Workspace {
         };
         match ev {
             ModalEvent::Dismiss => self.close_modal(window, cx),
+            ModalEvent::Pick(ChoiceValue::Ea(pid)) if matches!(open.kind, ModalKind::Attach) => {
+                let pid = *pid as u32;
+                self.close_modal(window, cx);
+                self.session.update(cx, |s, cx| s.dbg_attach(pid, cx));
+            }
             ModalEvent::Pick(ChoiceValue::Ea(ea)) => {
                 let ea = *ea;
                 self.close_modal(window, cx);
@@ -1515,7 +1527,7 @@ impl Workspace {
                         self.close_modal(window, cx);
                         self.session.update(cx, |s, cx| s.goto_expr(text, cx));
                     }
-                    ModalKind::Pick => {}
+                    ModalKind::Pick | ModalKind::Attach => {}
                 }
             }
         }
@@ -1942,7 +1954,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
         let t = theme;
-        let state = self.view_state();
+        let state = self.view_state(cx);
         let ready = self.session.read(cx).is_ready();
         let dbs: Vec<DbEntry> = self
             .tabs(cx)
@@ -2061,6 +2073,78 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|w, _: &RunScriptFile, window, cx| w.script_dialog(window, cx)))
+            .on_action(cx.listener(|w, _: &DebugStart, _, cx| {
+                w.session.update(cx, |s, cx| s.dbg_start_or_continue(cx))
+            }))
+            .on_action(
+                cx.listener(|w, _: &DebugPause, _, cx| {
+                    w.session.update(cx, |s, cx| s.dbg_pause(cx))
+                }),
+            )
+            .on_action(cx.listener(|w, _: &DebugTerminate, _, cx| {
+                w.session.update(cx, |s, cx| s.dbg_terminate(cx))
+            }))
+            .on_action(cx.listener(|w, _: &DebugDetach, _, cx| {
+                w.session.update(cx, |s, cx| s.dbg_detach(cx))
+            }))
+            .on_action(cx.listener(|w, _: &DebugAttach, window, cx| w.attach_picker(window, cx)))
+            .on_action(cx.listener(|w, _: &DebugStepInto, _, cx| {
+                w.session
+                    .update(cx, |s, cx| s.dbg_resume(ResumeHow::StepInto, 0, cx))
+            }))
+            .on_action(cx.listener(|w, _: &DebugStepOver, _, cx| {
+                w.session
+                    .update(cx, |s, cx| s.dbg_resume(ResumeHow::StepOver, 0, cx))
+            }))
+            .on_action(cx.listener(|w, _: &DebugStepOut, _, cx| {
+                w.session
+                    .update(cx, |s, cx| s.dbg_resume(ResumeHow::StepOut, 0, cx))
+            }))
+            .on_action(cx.listener(|w, _: &DebugRunToCursor, _, cx| {
+                let ea = w.session.read(cx).cursor;
+                w.session
+                    .update(cx, |s, cx| s.dbg_resume(ResumeHow::RunTo, ea, cx))
+            }))
+            .on_action(cx.listener(|w, _: &ToggleBreakpoint, _, cx| {
+                let ea = w.session.read(cx).cursor;
+                w.session.update(cx, |s, cx| s.dbg_toggle_bpt(ea, cx))
+            }))
+            .on_action(cx.listener(|w, _: &DebuggerOptions, window, cx| {
+                w.open_settings(Section::Debugger, window, cx)
+            }))
+            .on_action(cx.listener(|w, _: &ShowBreakpoints, _, cx| {
+                w.show_debug_tab(BottomTab::Breakpoints, cx)
+            }))
+            .on_action(
+                cx.listener(|w, _: &ShowRegisters, _, cx| {
+                    w.show_debug_tab(BottomTab::Registers, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|w, _: &ShowStack, _, cx| w.show_debug_tab(BottomTab::Stack, cx)),
+            )
+            .on_action(
+                cx.listener(|w, _: &ShowMemory, _, cx| w.show_debug_tab(BottomTab::Memory, cx)),
+            )
+            .on_action(
+                cx.listener(|w, _: &ShowCallStack, _, cx| {
+                    w.show_debug_tab(BottomTab::CallStack, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|w, _: &ShowThreads, _, cx| w.show_debug_tab(BottomTab::Threads, cx)),
+            )
+            .on_action(
+                cx.listener(|w, _: &ShowModules, _, cx| w.show_debug_tab(BottomTab::Modules, cx)),
+            )
+            .on_action(
+                cx.listener(|w, _: &ShowDebugEvents, _, cx| {
+                    w.show_debug_tab(BottomTab::Events, cx)
+                }),
+            )
+            .on_action(cx.listener(|w, _: &ShowExceptions, _, cx| {
+                w.show_debug_tab(BottomTab::Exceptions, cx)
+            }))
             .on_action(cx.listener(|w, _: &ShowFunctions, window, cx| {
                 w.show_tab(Tab::Functions, window, cx)
             }))

@@ -179,14 +179,14 @@ impl Element for EditorElement {
             let marked_here = marked
                 .as_ref()
                 .and_then(|m| range_on_line(m, i, raw.len()))
-                .map(&map);
+                .map(map);
             let error_here = ed
                 .errors
                 .iter()
                 .any(|e| e.start_line <= i && i <= e.end_line)
                 .then(|| text::first_nonblank(raw)..raw.trim_end().len())
                 .filter(|r| r.start < r.end)
-                .map(&map);
+                .map(map);
             let runs: Vec<TextRun> = runs::segments(&disp, &mapped, marked_here, error_here)
                 .into_iter()
                 .map(|s| {

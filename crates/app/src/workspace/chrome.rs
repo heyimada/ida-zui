@@ -393,6 +393,163 @@ impl Workspace {
             .when(enabled, |d| d.tooltip(tip(label, Some(shortcut))))
     }
 
+    /// The debugger's controls, shown while a process exists: continue or
+    /// pause, the steps, run to cursor and terminate.
+    fn debug_controls(&self, t: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let (active, suspended, state, has_exception) = {
+            let d = &self.session.read(cx).dbg;
+            (d.active(), d.suspended(), d.state, d.exception.is_some())
+        };
+        if !active {
+            return None;
+        }
+        let t = *t;
+        // (id, icon, tooltip, enabled, colour, action)
+        let button = |id: &'static str,
+                      name: &'static str,
+                      label: &'static str,
+                      shortcut: String,
+                      enabled: bool,
+                      color: u32,
+                      cx: &mut Context<Self>| {
+            let b = div()
+                .id(id)
+                .size(px(26.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.))
+                .when(enabled, |d| {
+                    d.cursor_pointer()
+                        .hover(move |d| d.bg(hsla(t.hover)))
+                        .tooltip(tip(label, Some(shortcut)))
+                })
+                .child(icon(name, 16., hsla(if enabled { color } else { t.faint })));
+            let _ = cx;
+            b
+        };
+        let sc = |a: &dyn gpui::Action, cx: &App| crate::actions::shortcut_text(a, cx);
+        let go =
+            if suspended {
+                button(
+                    "dbg-continue",
+                    "play",
+                    "Continue",
+                    sc(&DebugStart, cx),
+                    true,
+                    t.success,
+                    cx,
+                )
+                .on_click(cx.listener(|w, _, _, cx| {
+                    w.session.update(cx, |s, cx| s.dbg_start_or_continue(cx))
+                }))
+            } else {
+                button(
+                    "dbg-pause",
+                    "pause",
+                    "Pause",
+                    sc(&DebugPause, cx),
+                    true,
+                    t.warning,
+                    cx,
+                )
+                .on_click(cx.listener(|w, _, _, cx| w.session.update(cx, |s, cx| s.dbg_pause(cx))))
+            };
+        let step = |id: &'static str,
+                    name: &'static str,
+                    label: &'static str,
+                    shortcut: String,
+                    how: ida_proto::ResumeHow,
+                    cx: &mut Context<Self>| {
+            button(id, name, label, shortcut, suspended, t.text, cx).on_click(cx.listener(
+                move |w, _, _, cx| {
+                    let ea = w.session.read(cx).cursor;
+                    w.session.update(cx, |s, cx| s.dbg_resume(how, ea, cx))
+                },
+            ))
+        };
+        let tag = match state {
+            ida_proto::DbgRun::Running => ("Running", t.success),
+            ida_proto::DbgRun::Suspended if has_exception => ("Exception", t.danger),
+            _ => ("Suspended", t.warning),
+        };
+        Some(
+            div()
+                .h(px(28.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .px(px(4.))
+                .rounded(px(8.))
+                .bg(hsla(t.surface2))
+                .border_1()
+                .border_color(hsla(t.border))
+                .child(go)
+                .child(step(
+                    "dbg-over",
+                    "step-over",
+                    "Step over",
+                    sc(&DebugStepOver, cx),
+                    ida_proto::ResumeHow::StepOver,
+                    cx,
+                ))
+                .child(step(
+                    "dbg-into",
+                    "step-into",
+                    "Step into",
+                    sc(&DebugStepInto, cx),
+                    ida_proto::ResumeHow::StepInto,
+                    cx,
+                ))
+                .child(step(
+                    "dbg-out",
+                    "step-out",
+                    "Run until return",
+                    sc(&DebugStepOut, cx),
+                    ida_proto::ResumeHow::StepOut,
+                    cx,
+                ))
+                .child(step(
+                    "dbg-to-cursor",
+                    "run-to-cursor",
+                    "Run to cursor",
+                    sc(&DebugRunToCursor, cx),
+                    ida_proto::ResumeHow::RunTo,
+                    cx,
+                ))
+                .child(div().w(px(1.)).h(px(14.)).mx(px(2.)).bg(hsla(t.border)))
+                .child(
+                    button(
+                        "dbg-stop",
+                        "stop",
+                        "Terminate process",
+                        sc(&DebugTerminate, cx),
+                        true,
+                        t.danger,
+                        cx,
+                    )
+                    .on_click(
+                        cx.listener(|w, _, _, cx| {
+                            w.session.update(cx, |s, cx| s.dbg_terminate(cx))
+                        }),
+                    ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .px(px(8.))
+                        .text_size(px(11.))
+                        .text_color(hsla(t.muted))
+                        .child(ui::dot(6., tag.1))
+                        .child(tag.0),
+                ),
+        )
+    }
+
     pub fn toolbar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = *theme;
         let s = self.session.read(cx);
@@ -507,6 +664,7 @@ impl Workspace {
                         .child("Analysis idle"),
                 )
         });
+        let debug = self.debug_controls(&t, cx);
         let mode = self.mode;
         let seg = |id: &'static str, label: &'static str, m: Mode, cx: &mut Context<Self>| {
             ui::segment(id, label, mode == m, &t)
@@ -614,6 +772,7 @@ impl Workspace {
             .border_color(hsla(t.border))
             .child(cluster)
             .children(pill)
+            .children(debug)
             .child(div().flex_1())
             .children(segmented)
             .children(split)
@@ -855,6 +1014,29 @@ impl Workspace {
             .addr
             .as_ref()
             .and_then(|a| a.segment.clone());
+        let dbg_status = (s.dbg.active()).then(|| {
+            let (dot, text) = match s.dbg.state {
+                ida_proto::DbgRun::Running => (t.success, "Running".to_owned()),
+                _ => {
+                    let at = s.dbg.ip.map(|ip| s.symbol_at(ip)).unwrap_or_default();
+                    match &s.dbg.exception {
+                        Some(e) => (
+                            t.danger,
+                            format!(
+                                "Exception {} at {at}",
+                                if e.name.is_empty() {
+                                    format!("0x{:08X}", e.code)
+                                } else {
+                                    e.name.clone()
+                                }
+                            ),
+                        ),
+                        None => (t.warning, format!("Suspended at {at} ({})", s.dbg.reason)),
+                    }
+                }
+            };
+            (dot, text)
+        });
         let place = match (caret.block, caret.line) {
             (Some(b), Some(l)) => format!("Block #{b}, line {l}"),
             (None, Some(l)) => format!("Line {l}, Col {}", caret.col),
@@ -901,6 +1083,17 @@ impl Workspace {
             d.child(div().font_family(code_font_name()).child(f))
         })
         .when_some(segment, |d, seg| d.child(div().child(seg)))
+        .when_some(dbg_status, |d, (dot, text)| {
+            d.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_color(hsla(t.text))
+                    .child(ui::dot(6., dot))
+                    .child(text),
+            )
+        })
         .when(dirty, |d| {
             d.child(
                 div()

@@ -27,6 +27,9 @@ pub struct ViewState {
     pub inspector: bool,
     pub bottom: bool,
     pub split: bool,
+    /// A process exists (running or suspended).
+    pub debug_active: bool,
+    pub debug_suspended: bool,
 }
 
 /// What activating an item does.
@@ -152,6 +155,14 @@ pub fn build(ready: bool, view: ViewState, dbs: &[DbEntry], cx: &App) -> Vec<Men
     let toggle = |entry: Entry, on: bool| match entry {
         Entry::Item(mut i) => {
             i.checked = on;
+            Entry::Item(i)
+        }
+        other => other,
+    };
+    // A command that is only available in some debugger states.
+    let gate = |entry: Entry, on: bool| match entry {
+        Entry::Item(mut i) => {
+            i.enabled = i.enabled && on;
             Entry::Item(i)
         }
         other => other,
@@ -382,14 +393,42 @@ pub fn build(ready: bool, view: ViewState, dbs: &[DbEntry], cx: &App) -> Vec<Men
         m(
             "Debugger",
             0,
-            vec![Entry::Item(Item {
-                label: "Debugger (not implemented yet)".into(),
-                detail: SharedString::default(),
-                shortcut: SharedString::default(),
-                enabled: false,
-                checked: false,
-                target: Target::ClearRecent,
-            })],
+            vec![
+                gate(
+                    c!(DebugStart, "Start process / continue"),
+                    ready && (!view.debug_active || view.debug_suspended),
+                ),
+                gate(c!(DebugPause), view.debug_active && !view.debug_suspended),
+                gate(c!(DebugTerminate), view.debug_active),
+                Entry::Sep,
+                gate(c!(DebugAttach), ready && !view.debug_active),
+                gate(c!(DebugDetach), view.debug_active),
+                Entry::Sep,
+                gate(c!(DebugStepInto), view.debug_suspended),
+                gate(c!(DebugStepOver), view.debug_suspended),
+                gate(c!(DebugStepOut), view.debug_suspended),
+                gate(c!(DebugRunToCursor), view.debug_suspended),
+                Entry::Sep,
+                c!(ToggleBreakpoint),
+                Entry::Sep,
+                Entry::Sub {
+                    label: "Debugger windows".into(),
+                    enabled: ready,
+                    entries: vec![
+                        c!(ShowRegisters),
+                        c!(ShowStack),
+                        c!(ShowMemory),
+                        c!(ShowCallStack),
+                        c!(ShowThreads),
+                        c!(ShowModules),
+                        c!(ShowBreakpoints),
+                        c!(ShowDebugEvents),
+                        c!(ShowExceptions),
+                    ],
+                },
+                Entry::Sep,
+                c!(DebuggerOptions),
+            ],
         ),
         m(
             "Options",

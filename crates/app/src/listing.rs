@@ -79,6 +79,8 @@ impl ListingView {
                 this.show(*ea, false, cx)
             }
             SessionEvent::Opened => this.load_segments(cx),
+            SessionEvent::Rebased => this.load_segments(cx),
+            SessionEvent::DebugChanged => cx.notify(),
             SessionEvent::Changed => this.refresh(cx),
             SessionEvent::Closed => {
                 this.rows.clear();
@@ -515,6 +517,13 @@ impl ListingView {
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        // A click in the marker gutter sets or clears a breakpoint.
+        if let Some(row) = self.hit.gutter_row(ev.position) {
+            if let Some(ea) = self.rows.get(row).map(|r| r.ea) {
+                self.session.update(cx, |s, cx| s.dbg_toggle_bpt(ea, cx));
+            }
+            return;
+        }
         let Some((row, col)) = self.hit.hit(ev.position) else {
             return;
         };
@@ -561,6 +570,11 @@ impl ListingView {
                 let end = (first + visible).min(view.rows.len());
                 let cursor = view.cursor;
                 let highlight = view.highlight.clone();
+                // Several lines can share an address (a segment header sits on the
+                // first instruction); the markers belong to the last of them.
+                let last_of_ea: Vec<bool> = (first..end)
+                    .map(|i| view.rows.get(i + 1).is_none_or(|n| n.ea != view.rows[i].ea))
+                    .collect();
                 let rows: Vec<(usize, SharedString, u8, Line, Ea)> = (first..end)
                     .map(|i| {
                         let r = &view.rows[i];
@@ -571,7 +585,8 @@ impl ListingView {
                 let scroll_x = px(view.scroll_x);
                 let focused = view.focus.is_focused(window);
                 let cw = code::char_width(window);
-                let gutter = cw * 26.;
+                let gutter = cw * 26. + px(code::MARK_W);
+                let marks = code::DebugMarks::read(view.session.read(cx));
                 let text_left = bounds.left() + gutter + px(14.);
                 let text_x = text_left - scroll_x;
                 window.paint_quad(gpui::fill(
@@ -595,8 +610,15 @@ impl ListingView {
                     for (k, (i, prefix, _pcolor, line, ea)) in rows.into_iter().enumerate() {
                         let y = bounds.top() + px((k as f32 - frac) * line_height());
                         let same_item = cursor_ea == Some(ea);
+                        let own = last_of_ea[i - first];
+                        if let Some(bg) = marks.row_bg(ea, &theme).filter(|_| own) {
+                            code::paint_row_bg(bounds, y, bg, window);
+                        }
+                        let marked = own && marks.row_bg(ea, &theme).is_some();
                         if i == cursor {
-                            code::paint_row_bg(bounds, y, hsla(theme.caret_row), window);
+                            if !marked {
+                                code::paint_row_bg(bounds, y, hsla(theme.caret_row), window);
+                            }
                             if focused {
                                 window.paint_quad(gpui::fill(
                                     gpui::Bounds::new(
@@ -606,7 +628,7 @@ impl ListingView {
                                     hsla(theme.accent),
                                 ));
                             }
-                        } else if same_item {
+                        } else if same_item && !marked {
                             code::paint_row_bg(bounds, y, hsla(theme.caret_row), window);
                         }
                         let shaped = code::shape(window, &line, &theme, highlight.as_deref());
@@ -631,7 +653,15 @@ impl ListingView {
                                 hsla(theme.faint)
                             },
                         );
-                        code::paint_shaped(&p, point(bounds.left() + px(10.), y), window, cx);
+                        code::paint_shaped(
+                            &p,
+                            point(bounds.left() + px(code::MARK_W + 6.), y),
+                            window,
+                            cx,
+                        );
+                        if own {
+                            marks.paint(ea, bounds.left(), y, &theme, window);
+                        }
                         hit.rows.push((i, y, shaped));
                     }
                 });

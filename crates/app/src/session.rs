@@ -1,5 +1,6 @@
 // One open database: the host process, navigation state and change tracking.
 // Views subscribe to `SessionEvent`s; they never talk to each other directly.
+use crate::debugger::DebugModel;
 use crate::open_dialog::{Loader, OpenRequest, PROCESSORS};
 use crate::settings;
 use futures::StreamExt;
@@ -11,6 +12,8 @@ use ida_proto::{
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+
+pub(crate) mod debug;
 
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -66,6 +69,13 @@ pub enum SessionEvent {
     /// Open an editor tab (local types, a structure, an enum, a stack frame).
     OpenDoc(crate::docs::DocKey),
     ListsReloaded,
+    /// The debugger state changed (process state, breakpoints, registers).
+    DebugChanged,
+    /// The process stopped at `ip`.
+    DebugStopped,
+    /// The database moved to match the process (or back); every address
+    /// the view holds is stale.
+    Rebased,
     Closed,
 }
 
@@ -113,6 +123,8 @@ pub struct Session {
     /// A script is executing; the host cannot answer other requests until it
     /// returns, so refreshes wait.
     pub python_running: bool,
+    /// The debugger: process state, breakpoints, registers, stack.
+    pub dbg: DebugModel,
     /// Changes the UI did not make itself (a script) wait here for a refresh.
     ext_pending: bool,
     ext_lists: bool,
@@ -145,6 +157,7 @@ impl Session {
             names: Rc::default(),
             analysis: None,
             python_running: false,
+            dbg: DebugModel::new(),
             ext_pending: false,
             ext_lists: false,
             ext_task: None,
@@ -169,6 +182,7 @@ impl Session {
                 ..
             }) => {}
             HostEvent::DbChanged(d) => self.mark_external(d.affects_lists(), cx),
+            HostEvent::Debug(d) => self.on_debug_event(d, cx),
         }
     }
 
@@ -371,6 +385,9 @@ impl Session {
                         s.analysis = None;
                         s.dirty = fresh;
                         s.reload_lists(cx);
+                        s.dbg = DebugModel::new();
+                        s.dbg_load_bpts(cx);
+                        s.dbg_load_exceptions(cx);
                         cx.emit(SessionEvent::Opened);
                         let ea = s.cursor;
                         cx.emit(SessionEvent::Navigated { ea });
@@ -667,6 +684,7 @@ impl Session {
         self.python_running = false;
         self.ext_pending = false;
         self.ext_task = None;
+        self.dbg = DebugModel::new();
         cx.emit(SessionEvent::Closed);
         cx.notify();
         let executor = cx.background_executor().clone();

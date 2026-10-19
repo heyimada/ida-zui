@@ -32,7 +32,7 @@ pub struct PanelLayout {
     pub bottom_h: f32,
     /// Activity rail selection: `functions`, `names`, ...
     pub rail: String,
-    /// `output`, `xrefs` or `python`.
+    /// `output`, `xrefs`, `python` or a debugger panel (`registers`, ...).
     pub bottom_tab: String,
     /// `info`, `type`, `xrefs` or `comments`.
     pub inspector_tab: String,
@@ -63,6 +63,62 @@ impl PanelLayout {
     }
 }
 
+/// What happens to exceptions in the debuggee when a session starts.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExceptionPolicy {
+    /// IDA's own table (stop on the usual faults).
+    #[default]
+    Ida,
+    /// Never stop; every exception goes to the program.
+    PassAll,
+    /// Stop on every exception.
+    StopAll,
+}
+
+impl ExceptionPolicy {
+    pub const ALL: [ExceptionPolicy; 3] = [Self::Ida, Self::PassAll, Self::StopAll];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ida => "IDA defaults",
+            Self::PassAll => "Pass all to the program",
+            Self::StopAll => "Stop on all",
+        }
+    }
+}
+
+/// How the debugger starts a process (Settings > Debugger).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct DebuggerSettings {
+    /// The program to run; empty means the database's input file.
+    pub app_path: String,
+    pub args: String,
+    /// Working directory; empty means the program's own folder.
+    pub cwd: String,
+    pub stop_at_entry: bool,
+    pub stop_on_library: bool,
+    pub stop_on_thread: bool,
+    pub disable_aslr: bool,
+    pub exceptions: ExceptionPolicy,
+}
+
+impl Default for DebuggerSettings {
+    fn default() -> Self {
+        Self {
+            app_path: String::new(),
+            args: String::new(),
+            cwd: String::new(),
+            stop_at_entry: true,
+            stop_on_library: false,
+            stop_on_thread: false,
+            disable_aslr: false,
+            exceptions: ExceptionPolicy::Ida,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -88,6 +144,7 @@ pub struct Settings {
     pub keymap: BTreeMap<String, Vec<String>>,
     pub recent: Vec<Recent>,
     pub layout: PanelLayout,
+    pub debugger: DebuggerSettings,
 }
 
 impl Default for Settings {
@@ -106,6 +163,7 @@ impl Default for Settings {
             keymap: BTreeMap::new(),
             recent: Vec::new(),
             layout: PanelLayout::default(),
+            debugger: DebuggerSettings::default(),
         }
     }
 }

@@ -1,10 +1,13 @@
 // The bottom panel: IDA's output, the live cross references of the item
 // under the caret, and the IDAPython console.
 // Tabs use the underline style of the editor tab strip.
+mod debug;
+
 use crate::focus::{Focus, FocusEvent};
 use crate::py_console::PyConsole;
 use crate::scrollbar::{self, Axes, Source};
 use crate::session::Session;
+use crate::table::InlineEdit;
 use crate::theme::{Theme, code_font_name, hsla};
 use crate::ui::{self, BadgeKind};
 use gpui::{
@@ -17,6 +20,16 @@ pub enum BottomTab {
     Output,
     Xrefs,
     Python,
+    // The debugger's panels.
+    Registers,
+    Stack,
+    Memory,
+    CallStack,
+    Threads,
+    Modules,
+    Breakpoints,
+    Events,
+    Exceptions,
 }
 
 impl BottomTab {
@@ -25,6 +38,15 @@ impl BottomTab {
             BottomTab::Output => "output",
             BottomTab::Xrefs => "xrefs",
             BottomTab::Python => "python",
+            BottomTab::Registers => "registers",
+            BottomTab::Stack => "stack",
+            BottomTab::Memory => "memory",
+            BottomTab::CallStack => "callstack",
+            BottomTab::Threads => "threads",
+            BottomTab::Modules => "modules",
+            BottomTab::Breakpoints => "breakpoints",
+            BottomTab::Events => "events",
+            BottomTab::Exceptions => "exceptions",
         }
     }
 
@@ -32,9 +54,52 @@ impl BottomTab {
         match key {
             "output" => BottomTab::Output,
             "python" => BottomTab::Python,
+            "registers" => BottomTab::Registers,
+            "stack" => BottomTab::Stack,
+            "memory" => BottomTab::Memory,
+            "callstack" => BottomTab::CallStack,
+            "threads" => BottomTab::Threads,
+            "modules" => BottomTab::Modules,
+            "breakpoints" => BottomTab::Breakpoints,
+            "events" => BottomTab::Events,
+            "exceptions" => BottomTab::Exceptions,
             _ => BottomTab::Xrefs,
         }
     }
+
+    fn label(self) -> &'static str {
+        match self {
+            BottomTab::Output => "Output",
+            BottomTab::Xrefs => "Xrefs",
+            BottomTab::Python => "Python",
+            BottomTab::Registers => "Registers",
+            BottomTab::Stack => "Stack",
+            BottomTab::Memory => "Memory",
+            BottomTab::CallStack => "Call stack",
+            BottomTab::Threads => "Threads",
+            BottomTab::Modules => "Modules",
+            BottomTab::Breakpoints => "Breakpoints",
+            BottomTab::Events => "Events",
+            BottomTab::Exceptions => "Exceptions",
+        }
+    }
+
+    /// One of the debugger panels.
+    pub fn is_debug(self) -> bool {
+        !matches!(
+            self,
+            BottomTab::Output | BottomTab::Xrefs | BottomTab::Python
+        )
+    }
+}
+
+/// What the inline cell editor of the debugger panels is editing.
+#[derive(Clone, PartialEq)]
+pub enum EditKind {
+    Reg(String),
+    /// The condition of the breakpoint at an address.
+    Cond(ida_proto::Ea),
+    MemExpr,
 }
 
 pub enum BottomEvent {
@@ -50,6 +115,10 @@ pub struct BottomPanel {
     pub console: Entity<PyConsole>,
     pub tab: BottomTab,
     selected: Option<usize>,
+    /// The open cell editor of a debugger panel.
+    edit: Option<(EditKind, InlineEdit)>,
+    /// The debugger revision the events log last scrolled for.
+    events_seen: std::cell::Cell<u64>,
     _subs: Vec<Subscription>,
 }
 
@@ -85,6 +154,8 @@ impl BottomPanel {
             console,
             tab,
             selected: None,
+            edit: None,
+            events_seen: std::cell::Cell::new(0),
             _subs: subs,
         }
     }
@@ -296,18 +367,50 @@ impl Render for BottomPanel {
         let focus = self.focus.read(cx);
         let count = focus.target_xrefs.len();
         let target = focus.target_name.clone();
-        let tabs = [
-            (BottomTab::Output, "Output"),
-            (BottomTab::Xrefs, "Xrefs"),
-            (BottomTab::Python, "Python"),
+        let (dbg_active, bpt_count) = {
+            let s = self.session.read(cx);
+            (s.dbg.active(), s.dbg.bpts.len())
+        };
+        // The debugger tabs show while a process lives (Breakpoints always).
+        let mut tabs: Vec<Option<BottomTab>> = vec![
+            Some(BottomTab::Output),
+            Some(BottomTab::Xrefs),
+            Some(BottomTab::Python),
+            None,
         ];
+        let debug_tabs: &[BottomTab] = if dbg_active || self.tab.is_debug() {
+            &[
+                BottomTab::Registers,
+                BottomTab::Stack,
+                BottomTab::Memory,
+                BottomTab::CallStack,
+                BottomTab::Threads,
+                BottomTab::Modules,
+                BottomTab::Breakpoints,
+                BottomTab::Events,
+                BottomTab::Exceptions,
+            ]
+        } else {
+            &[BottomTab::Breakpoints]
+        };
+        tabs.extend(debug_tabs.iter().map(|t| Some(*t)));
         let body = match self.tab {
             BottomTab::Output => self.render_output(&t, window, cx),
             BottomTab::Xrefs => self.render_xrefs(&t, window, cx),
             BottomTab::Python => self.render_python(),
+            BottomTab::Registers => self.render_registers(&t, window, cx),
+            BottomTab::Stack => self.render_stack(&t, window, cx),
+            BottomTab::Memory => self.render_memory(&t, window, cx),
+            BottomTab::CallStack => self.render_call_stack(&t, window, cx),
+            BottomTab::Threads => self.render_threads(&t, window, cx),
+            BottomTab::Modules => self.render_modules(&t, window, cx),
+            BottomTab::Breakpoints => self.render_breakpoints(&t, window, cx),
+            BottomTab::Events => self.render_events(&t, window, cx),
+            BottomTab::Exceptions => self.render_exceptions(&t, window, cx),
         };
+        self.events_seen.set(self.session.read(cx).dbg.revision);
         let py_running = self.console.read(cx).is_running();
-        div()
+        self.wire_edit(div().id("bottom-panel"), cx)
             .size_full()
             .flex()
             .flex_col()
@@ -322,7 +425,16 @@ impl Render for BottomPanel {
                     .bg(hsla(t.bg))
                     .border_b_1()
                     .border_color(hsla(t.border))
-                    .children(tabs.into_iter().map(|(tab, label)| {
+                    .children(tabs.into_iter().map(|entry| {
+                        let Some(tab) = entry else {
+                            return div()
+                                .w(px(1.))
+                                .h(px(14.))
+                                .mx(px(6.))
+                                .bg(hsla(t.border))
+                                .into_any_element();
+                        };
+                        let label = tab.label();
                         let on = tab == self.tab;
                         div()
                             .id(label)
@@ -342,6 +454,8 @@ impl Render for BottomPanel {
                             .when(!on, |d| d.hover(move |d| d.text_color(hsla(t.text))))
                             .on_click(cx.listener(move |v, _, _, cx| {
                                 v.tab = tab;
+                                v.selected = None;
+                                v.edit = None;
                                 cx.emit(BottomEvent::TabChanged);
                                 cx.notify();
                             }))
@@ -349,9 +463,13 @@ impl Render for BottomPanel {
                             .when(tab == BottomTab::Xrefs && count > 0, |d| {
                                 d.child(ui::badge(count.to_string(), BadgeKind::Count, &t))
                             })
+                            .when(tab == BottomTab::Breakpoints && bpt_count > 0, |d| {
+                                d.child(ui::badge(bpt_count.to_string(), BadgeKind::Danger, &t))
+                            })
                             .when(tab == BottomTab::Python && py_running, |d| {
                                 d.child(ui::spinner("py-tab-spin", 12., hsla(t.accent)))
                             })
+                            .into_any_element()
                     }))
                     .child(div().flex_1())
                     .when(self.tab == BottomTab::Python, |d| {

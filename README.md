@@ -6,7 +6,7 @@
 
 ![ida-zui main window, light theme](docs/images/main-light.png)
 
-> **Status: early.** Disassembly, pseudocode, graph, hex, type editors, a Python console, signatures, plugins and multi-database windows work today. The debugger does not exist yet. See [Status and known gaps](#status-and-known-gaps) and [docs/GAPS.md](docs/GAPS.md).
+> **Status: early.** Disassembly, pseudocode, graph, hex, type editors, a Python console, signatures, plugins and multi-database windows work today. Local Windows debugging works too. See [Status and known gaps](#status-and-known-gaps) and [docs/GAPS.md](docs/GAPS.md).
 
 ## Features
 
@@ -32,6 +32,7 @@
   ![Command palette](docs/images/palette.png)
 
 - **FLIRT signatures**, **Lumina** pull and (confirmed) push, and **plugins**: IDA's plugin loader entries are listed, can be run headless, and get keymap entries.
+- **Debugger** (Windows, user mode): start or attach, breakpoints (conditional, hardware), step into / over / out, run to cursor, registers (editable, changes highlighted), stack, memory, call stack, threads, modules, exceptions and the program's debug output, with markers in the listing, graph, pseudocode and hex view. Details below.
 - **Several databases per window**, one host process each, with analysis progress, safe close (Save / Don't save / Cancel) and recent files.
 - **Settings**: themes (Dark, Light, High contrast, IDA Classic), fonts, an editable keymap with conflict detection, and analysis and Python options.
 
@@ -95,8 +96,18 @@ Top to bottom: title strip (the product glyph, then one chip per open database),
 - **Editor column:** a tab strip (the main view, then Local types, structures, enums and frames), a jump bar (`file > segment > function > address`), the centre view (or two panes when split) and the bottom panel.
 - **Inspector:** Info (function facts, prototype, xrefs, callees; in graph view the basic block, its successors, predecessors and calls), Type, Xrefs and Comments.
 - **Bottom panel:** Output, live Xrefs to the name under the caret (click a row to jump) and a Python tab with the IDAPython console (below).
-- Panels toggle from the toolbar and the View menu (`Ctrl+Alt+B` inspector, `Ctrl+Alt+J` bottom panel) and drag to resize; sizes, visibility and the split are remembered in `settings.json`.
+- Panels toggle from the toolbar and the View menu (`Ctrl+Alt+I` inspector, `Ctrl+Alt+J` bottom panel) and drag to resize; sizes, visibility and the split are remembered in `settings.json`.
 - The graph has a header strip (zoom controls, edge legend, minimap toggle) and a bottom-right minimap (click to pan; `View > Graph minimap`). Blocks drop the indent their instructions share. The palette groups results with kind badges and highlights the matched text. The themes are Dark and Light (plus High contrast and IDA Classic); IBM Plex Sans is bundled.
+
+## Debugger
+
+`Debugger` menu, toolbar controls while a process exists, and panels in the bottom dock (`Debugger > Debugger windows`): Registers, Stack, Memory, Call stack, Threads, Modules, Breakpoints, Events and Exceptions. It drives IDA's own `win32` debugger module through the host, so conditions, hardware breakpoints and the exception table are IDA's.
+
+- **Start / attach:** `F9` starts the database's input file (or the program, arguments and folder from `Settings > Debugger`) and continues a suspended process. `Debugger > Attach to process` lists running processes. Stopping at the entry point, on library or thread events and disabling ASLR are options; the exception policy (IDA defaults, pass all, stop on all) is applied at start and the Exceptions panel sets single codes.
+- **Breakpoints:** `F2` or a click in the marker gutter (listing, graph, pseudocode) sets one; a filled red dot is enabled, an outline is disabled. The Breakpoints panel enables, removes, shows hit counts (this session) and edits the condition (double-click; an IDC expression such as `RCX == 3`, or `py: ida_dbg.get_reg_val('RCX') == 3` for Python). They are stored in the database.
+- **Stops:** the instruction pointer shows as an arrow and a highlighted line in the listing, graph, pseudocode and hex view, and the views follow it. The status bar says what happened (breakpoint, step, exception). Registers that changed since the last stop are highlighted; click a value to edit it (an expression is accepted), click a flag to toggle it.
+- **Rebasing:** the system loads the program at an address of its own choosing, so the database is rebased to it while the process lives and rebased back when it ends. Saving (or closing with save) during a session ends the session first, and a rebased database is never written. Every address the UI holds (history, cursor, lists) follows the move.
+- **Safety:** the debugger runs real code. Debug only programs you trust. The tests debug a small program compiled from `scripts/debuggee/debuggee.c`; symbol servers are never contacted (`DOPT_LOAD_DINFO` stays off).
 
 ## Plugins and scrollbars
 
@@ -126,7 +137,7 @@ Every open database is a chip in the title strip: file name, a spinner and elaps
 ## Menus, settings and keys
 
 The window has a menu bar (File, Edit, Jump, Search, View, Options, Windows,
-Help; the Debugger menu arrives with the debugger). Click a title, hover to
+Help; the Debugger menu is described under Debugger). Click a title, hover to
 switch menus, use the arrow keys and Enter, press `Alt` or `F10` to focus the
 bar, or `Alt+F/E/J/S/V/O/W/H` to open a menu. Shortcuts shown in the menus come
 from the live keymap. Every command is also in the command palette.
@@ -172,7 +183,10 @@ IDA's defaults are used where IDA has one.
 | `` Ctrl+` `` | Output panel (IDA's messages) |
 | `Alt+F7` | Run a Python script file |
 | In the Python console: `Enter` / `Shift+Enter` / `Ctrl+Enter` / `Up`, `Down` | Run if complete / new line / run anyway / history |
-| `Ctrl+Alt+J` / `Ctrl+Alt+B` | Show or hide the bottom panel / the inspector |
+| `Ctrl+Alt+J` / `Ctrl+Alt+I` | Show or hide the bottom panel / the inspector |
+| `F9` / `F12` / `Ctrl+F2` | Debugger: start or continue / pause / terminate |
+| `F7` / `F8` / `Ctrl+F7` / `F4` | Debugger: step into / step over / run until return / run to cursor |
+| `F2` / `Ctrl+Alt+B` | Debugger: toggle a breakpoint at the cursor / breakpoint list |
 | `Ctrl+Shift+P` | Command palette (every command, searchable) |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Graph zoom (`Ctrl+wheel` also zooms; drag to pan) |
 
@@ -234,12 +248,20 @@ Tests never push to Lumina: the host refuses a push whenever `IDA_ZUI_AUTOMATION
 - Graph edges: loops and long edges into one block share one trunk and one arrival port. Edges sharing only a source are not bundled. The graph view still stops zooming out at 15% (L7).
 - The graph does not fold "N earlier instructions", and the focus ring is a 2 px spread without the 1 px offset.
 - Recent files show size and age but not the architecture badge.
-- Settings: Debugger and About sections are listed but disabled.
+- Settings: the About section is listed but disabled.
 - The split is off by default (the design's main window shows it on).
 - High contrast and IDA Classic extend the token set but have no mockup to compare against.
 
+**Debugger gaps**
+- Windows user mode only (the `win32` module); no remote, Linux or kernel debugging, no source-level debugging, no tracing, no appcall.
+- The listing and hex view show the database's bytes, not the process memory (the Memory panel reads the process; breakpoint bytes read as the originals). The database is not synchronised with the process, so self-modifying or unpacked code shows as analysed.
+- First or last chance of an exception is not reported by IDA's API; it is inferred (the same exception at the same address right after a continue is the last chance).
+- Hit counts are the UI session's own count of stops; threads show no per-thread instruction pointer; xmm/ymm registers are fetched but not shown; the pseudocode marks follow the nearest statement address, not an exact instruction.
+- Pausing uses a request that a target may never honour; the UI then offers to terminate (`pause_timeout`).
+- Attach and detach were tested against a process we start ourselves.
+
 **Not implemented**
-- Debugger
+- Source-level and remote debugging
 
 The full list of known gaps, with priorities and suggested fixes, is in [docs/GAPS.md](docs/GAPS.md). The roadmap is [docs/PLAN.md](docs/PLAN.md), and technical notes on idalib are in [docs/IDALIB_FINDINGS.md](docs/IDALIB_FINDINGS.md).
 

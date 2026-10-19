@@ -30,7 +30,8 @@ step_into(); step_over(); continue_process(); suspend_process(); exit_process();
 - `read_dbg_memory` shows `CC` at software breakpoints. `get_byte` shows the original byte.
 - Continuing from a breakpoint delivers a `STEP` event first, then the process runs.
 - `suspend_process` sometimes never completes (seen on a 2-thread target). Poll with a timeout and offer terminate.
-- Attach and detach were not tested.
+- Attach and detach work (tested against a spinning program we start ourselves).
+- Phase 7 notes: `request_suspend_process()` followed by `run_requests()` pauses a running target without blocking the host (the blocking `suspend_process` can wait for ever). The image base to track is `get_imagebase()`: `inf_get_min_ea()` also moves when the debugger adds low segments. `rebase_program(delta, MSF_FIXONCE|MSF_SILENT)` moves the database and its breakpoints back. `wait_for_next_event` needs the poll loop to run on the host thread; its minimum non-zero timeout is 40 ms. Exceptions the table does not know are added with `define_exception`. `bpt_t::set_cnd_elang("Python")` selects Python conditions.
 
 ## IDAPython: works
 

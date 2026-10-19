@@ -15,8 +15,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Same toolchain as rust-toolchain.toml, so new lints never break CI unannounced.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.1"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Format

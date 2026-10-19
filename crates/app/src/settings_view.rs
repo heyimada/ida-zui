@@ -26,6 +26,7 @@ pub enum Section {
     Listing,
     Keyboard,
     Analysis,
+    Debugger,
     Python,
 }
 
@@ -43,6 +44,10 @@ pub struct SettingsView {
     section: Section,
     font: Entity<TextInput>,
     filter: Entity<TextInput>,
+    /// The Debugger section: program, arguments and working directory.
+    dbg_path: Entity<TextInput>,
+    dbg_args: Entity<TextInput>,
+    dbg_cwd: Entity<TextInput>,
     /// The command whose shortcut is being recorded.
     recording: Option<&'static Command>,
     pending: Option<Pending>,
@@ -62,7 +67,31 @@ impl SettingsView {
                 .with_icon("search")
                 .with_keycap("/")
         });
+        let dbg = settings::get(cx).debugger.clone();
+        let dbg_path = cx.new(|cx| {
+            TextInput::new(&dbg.app_path, "The database input file", cx)
+                .tall()
+                .mono()
+        });
+        let dbg_args = cx.new(|cx| TextInput::new(&dbg.args, "No arguments", cx).tall().mono());
+        let dbg_cwd = cx.new(|cx| {
+            TextInput::new(&dbg.cwd, "The program folder", cx)
+                .tall()
+                .mono()
+        });
         let subs = vec![
+            cx.subscribe(&dbg_path, |_, input, _: &InputEvent, cx| {
+                let v = input.read(cx).value().to_owned();
+                settings::update(cx, |s| s.debugger.app_path = v);
+            }),
+            cx.subscribe(&dbg_args, |_, input, _: &InputEvent, cx| {
+                let v = input.read(cx).value().to_owned();
+                settings::update(cx, |s| s.debugger.args = v);
+            }),
+            cx.subscribe(&dbg_cwd, |_, input, _: &InputEvent, cx| {
+                let v = input.read(cx).value().to_owned();
+                settings::update(cx, |s| s.debugger.cwd = v);
+            }),
             cx.subscribe(&font, |_, input, _: &InputEvent, cx| {
                 let family = input.read(cx).value().trim().to_owned();
                 if !family.is_empty() && family != settings::get(cx).code_font {
@@ -76,6 +105,9 @@ impl SettingsView {
             section,
             font,
             filter,
+            dbg_path,
+            dbg_args,
+            dbg_cwd,
             recording: None,
             pending: None,
             interceptor: None,
@@ -217,6 +249,12 @@ impl SettingsView {
             Section::Python => settings::update(cx, |s| {
                 s.python_history_size = crate::py_history::DEFAULT_CAP
             }),
+            Section::Debugger => {
+                settings::update(cx, |s| s.debugger = settings::DebuggerSettings::default());
+                for input in [&self.dbg_path, &self.dbg_args, &self.dbg_cwd] {
+                    input.update(cx, |i, cx| i.set_value("", cx));
+                }
+            }
             Section::Listing => settings::update(cx, |s| {
                 s.listing_indent = settings::DEFAULT_INDENT;
                 s.listing_comment = settings::DEFAULT_COMMENT_COLUMN;
@@ -513,6 +551,79 @@ impl SettingsView {
                 })),
             )
             .child(caption(&t, "The loading screen, the database tab and the status bar show the stage and a percentage; off leaves the elapsed time only."))
+    }
+
+    fn render_debugger(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let t = *theme;
+        let d = settings::get(cx).debugger.clone();
+        let row = |label: &'static str, field: gpui::AnyElement| {
+            div()
+                .flex()
+                .items_start()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .w(px(160.))
+                        .flex_none()
+                        .h(px(32.))
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .text_color(hsla(t.muted))
+                        .child(label),
+                )
+                .child(div().flex_1().min_w_0().child(field))
+        };
+        let policies = settings::ExceptionPolicy::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| {
+                ui::segment(("exc-policy", i), p.label(), d.exceptions == p, &t).on_click(
+                    cx.listener(move |_, _, _, cx| {
+                        settings::update(cx, |s| s.debugger.exceptions = p);
+                        cx.notify();
+                    }),
+                )
+            });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::MEDIUM).child("Debugger"))
+            .child(row("Application", self.dbg_path.clone().into_any_element()))
+            .child(row("Arguments", self.dbg_args.clone().into_any_element()))
+            .child(row("Working directory", self.dbg_cwd.clone().into_any_element()))
+            .child(caption(&t, "Leave the application empty to debug the database's input file. The debugger runs real code: only start programs you trust."))
+            .child(
+                checkbox("dbg-entry", "Stop at the process entry point", d.stop_at_entry, &t).on_click(cx.listener(|_, _, _, cx| {
+                    settings::update(cx, |s| s.debugger.stop_at_entry = !s.debugger.stop_at_entry);
+                    cx.notify();
+                })),
+            )
+            .child(
+                checkbox("dbg-lib", "Stop when a library is loaded or unloaded", d.stop_on_library, &t).on_click(cx.listener(|_, _, _, cx| {
+                    settings::update(cx, |s| s.debugger.stop_on_library = !s.debugger.stop_on_library);
+                    cx.notify();
+                })),
+            )
+            .child(
+                checkbox("dbg-thread", "Stop when a thread starts or exits", d.stop_on_thread, &t).on_click(cx.listener(|_, _, _, cx| {
+                    settings::update(cx, |s| s.debugger.stop_on_thread = !s.debugger.stop_on_thread);
+                    cx.notify();
+                })),
+            )
+            .child(
+                checkbox("dbg-aslr", "Disable ASLR for the process", d.disable_aslr, &t).on_click(cx.listener(|_, _, _, cx| {
+                    settings::update(cx, |s| s.debugger.disable_aslr = !s.debugger.disable_aslr);
+                    cx.notify();
+                })),
+            )
+            .child(caption(&t, "The database is moved to the image base the system chose while the process lives and moved back when it ends, so it is never saved rebased."))
+            .child(row(
+                "Exceptions",
+                ui::segmented_track(&t).children(policies).into_any_element(),
+            ))
+            .child(caption(&t, "Applied when a process starts. The Exceptions panel changes single codes for the open database."))
     }
 
     fn render_python(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
@@ -896,9 +1007,11 @@ impl Focusable for SettingsView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         match self.section {
             Section::Keyboard => self.filter.read(cx).focus_handle(cx),
-            Section::Appearance | Section::Listing | Section::Analysis | Section::Python => {
-                self.focus.clone()
-            }
+            Section::Appearance
+            | Section::Listing
+            | Section::Analysis
+            | Section::Debugger
+            | Section::Python => self.focus.clone(),
         }
     }
 }
@@ -965,6 +1078,7 @@ impl Render for SettingsView {
             Section::Listing => self.render_listing(&theme, cx),
             Section::Keyboard => self.render_keyboard(&theme, window, cx),
             Section::Analysis => self.render_analysis(&theme, cx),
+            Section::Debugger => self.render_debugger(&theme, cx),
             Section::Python => self.render_python(&theme, cx),
         };
         let restore = "Restore defaults";
@@ -1029,7 +1143,13 @@ impl Render for SettingsView {
                                 Some(Section::Analysis),
                                 cx,
                             ))
-                            .child(nav("nav-debugger", "Debugger", "debug", None, cx))
+                            .child(nav(
+                                "nav-debugger",
+                                "Debugger",
+                                "debug",
+                                Some(Section::Debugger),
+                                cx,
+                            ))
                             .child(nav(
                                 "nav-python",
                                 "Python",

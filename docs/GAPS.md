@@ -73,7 +73,7 @@ The last section lists dropped and already-covered items so none of them gets lo
 
 ## Already covered elsewhere, or dropped
 
-- **Debugger menu placeholder:** Phase 7 fills it.
+- **Debugger (Phase 7) leftovers:** the listing and hex view show database bytes rather than process memory; xmm/ymm registers and per-thread instruction pointers are not shown; the exception chance is inferred; pseudocode markers snap to the nearest statement address; open frame/struct editor tabs keep stale addresses across a rebase; tab strip of the bottom panel clips on narrow windows.
 - **Debugger pitfalls** (`suspend_process` sometimes not completing, the ASLR rebase leaving the IDB rebased): Phase 7 must handle both. See `IDALIB_FINDINGS.md`.
 - **Lumina push untestable:** by design, tests must never push. Phase 6 implements it behind a confirmation.
 - **Graph only checked in the split pane, and edges crossing blocks:** Phase 6 covers edge routing plus a full-width check.

@@ -114,11 +114,19 @@ fn icon_bytes(path: &str) -> Option<Cow<'static, [u8]>> {
             "../assets/icons/panel-right.svg"
         )));
     }
+    if path == "icons/pause.svg" {
+        return Some(Cow::Borrowed(include_bytes!("../assets/icons/pause.svg")));
+    }
     if path == "icons/play.svg" {
         return Some(Cow::Borrowed(include_bytes!("../assets/icons/play.svg")));
     }
     if path == "icons/plus.svg" {
         return Some(Cow::Borrowed(include_bytes!("../assets/icons/plus.svg")));
+    }
+    if path == "icons/run-to-cursor.svg" {
+        return Some(Cow::Borrowed(include_bytes!(
+            "../assets/icons/run-to-cursor.svg"
+        )));
     }
     if path == "icons/save.svg" {
         return Some(Cow::Borrowed(include_bytes!("../assets/icons/save.svg")));
@@ -144,6 +152,21 @@ fn icon_bytes(path: &str) -> Option<Cow<'static, [u8]>> {
     }
     if path == "icons/split.svg" {
         return Some(Cow::Borrowed(include_bytes!("../assets/icons/split.svg")));
+    }
+    if path == "icons/step-into.svg" {
+        return Some(Cow::Borrowed(include_bytes!(
+            "../assets/icons/step-into.svg"
+        )));
+    }
+    if path == "icons/step-out.svg" {
+        return Some(Cow::Borrowed(include_bytes!(
+            "../assets/icons/step-out.svg"
+        )));
+    }
+    if path == "icons/step-over.svg" {
+        return Some(Cow::Borrowed(include_bytes!(
+            "../assets/icons/step-over.svg"
+        )));
     }
     if path == "icons/stop.svg" {
         return Some(Cow::Borrowed(include_bytes!("../assets/icons/stop.svg")));

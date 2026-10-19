@@ -116,6 +116,44 @@ mod ffi {
             max_nodes: u32,
             data: bool,
         ) -> i32;
+        pub fn izs_dbg_running() -> i32;
+        pub fn izs_dbg_poll();
+        pub fn izs_dbg_start(
+            path: *const c_char,
+            args: *const c_char,
+            cwd: *const c_char,
+            flags: u32,
+        ) -> i32;
+        pub fn izs_dbg_processes() -> i32;
+        pub fn izs_dbg_attach(pid: u32, flags: u32) -> i32;
+        pub fn izs_dbg_state() -> i32;
+        pub fn izs_dbg_detach() -> i32;
+        pub fn izs_dbg_terminate() -> i32;
+        pub fn izs_dbg_resume(how: i32, ea: u64) -> i32;
+        pub fn izs_dbg_pause(timeout_ms: u32) -> i32;
+        pub fn izs_dbg_bpts() -> i32;
+        pub fn izs_dbg_bpt_add(
+            ea: u64,
+            kind: *const c_char,
+            size: u32,
+            cond: *const c_char,
+            lang: *const c_char,
+        ) -> i32;
+        pub fn izs_dbg_bpt_del(ea: u64) -> i32;
+        pub fn izs_dbg_bpt_enable(ea: u64, on: bool) -> i32;
+        pub fn izs_dbg_bpt_cond(ea: u64, cond: *const c_char, lang: *const c_char) -> i32;
+        pub fn izs_dbg_regs(all: bool) -> i32;
+        pub fn izs_dbg_set_reg(name: *const c_char, value: u64) -> i32;
+        pub fn izs_dbg_mem_read(ea: u64, len: u32) -> i32;
+        pub fn izs_dbg_mem_write(ea: u64, hex: *const c_char) -> i32;
+        pub fn izs_dbg_threads() -> i32;
+        pub fn izs_dbg_select_thread(tid: u32) -> i32;
+        pub fn izs_dbg_modules() -> i32;
+        pub fn izs_dbg_stack() -> i32;
+        pub fn izs_dbg_symbolize(eas: *const c_char) -> i32;
+        pub fn izs_dbg_eval(expr: *const c_char) -> i32;
+        pub fn izs_dbg_exceptions() -> i32;
+        pub fn izs_dbg_set_exception(code: u32, stop: bool, pass: bool) -> i32;
         pub fn izs_undo() -> i32;
         pub fn izs_redo() -> i32;
     }
@@ -423,6 +461,76 @@ fn dispatch(method: &str, params: &str) -> Result<String, String> {
                     m.data,
                 )
             }
+            DbgStart::NAME => {
+                let m: DbgStart = p(params)?;
+                ffi::izs_dbg_start(
+                    cstr(m.path.as_deref().unwrap_or(""))?.as_ptr(),
+                    cstr(&m.args)?.as_ptr(),
+                    cstr(&m.cwd)?.as_ptr(),
+                    m.options.flags(),
+                )
+            }
+            DbgProcesses::NAME => ffi::izs_dbg_processes(),
+            DbgAttach::NAME => {
+                let m: DbgAttach = p(params)?;
+                ffi::izs_dbg_attach(m.pid, m.options.flags())
+            }
+            DbgDetach::NAME => ffi::izs_dbg_detach(),
+            DbgTerminate::NAME => ffi::izs_dbg_terminate(),
+            DbgState::NAME => ffi::izs_dbg_state(),
+            DbgResume::NAME => {
+                let m: DbgResume = p(params)?;
+                ffi::izs_dbg_resume(m.how.code(), m.ea)
+            }
+            DbgPause::NAME => ffi::izs_dbg_pause(p::<DbgPause>(params)?.timeout_ms),
+            DbgBpts::NAME => ffi::izs_dbg_bpts(),
+            DbgBptAdd::NAME => {
+                let m: DbgBptAdd = p(params)?;
+                ffi::izs_dbg_bpt_add(
+                    m.ea,
+                    cstr(&m.kind)?.as_ptr(),
+                    m.size,
+                    cstr(&m.cond)?.as_ptr(),
+                    cstr(&m.lang)?.as_ptr(),
+                )
+            }
+            DbgBptDel::NAME => ffi::izs_dbg_bpt_del(p::<DbgBptDel>(params)?.ea),
+            DbgBptEnable::NAME => {
+                let m: DbgBptEnable = p(params)?;
+                ffi::izs_dbg_bpt_enable(m.ea, m.enabled)
+            }
+            DbgBptCond::NAME => {
+                let m: DbgBptCond = p(params)?;
+                ffi::izs_dbg_bpt_cond(m.ea, cstr(&m.cond)?.as_ptr(), cstr(&m.lang)?.as_ptr())
+            }
+            DbgRegs::NAME => ffi::izs_dbg_regs(p::<DbgRegs>(params)?.all),
+            DbgSetReg::NAME => {
+                let m: DbgSetReg = p(params)?;
+                ffi::izs_dbg_set_reg(cstr(&m.name)?.as_ptr(), m.value)
+            }
+            DbgMemRead::NAME => {
+                let m: DbgMemRead = p(params)?;
+                ffi::izs_dbg_mem_read(m.ea, m.len)
+            }
+            DbgMemWrite::NAME => {
+                let m: DbgMemWrite = p(params)?;
+                ffi::izs_dbg_mem_write(m.ea, cstr(&m.hex)?.as_ptr())
+            }
+            DbgThreads::NAME => ffi::izs_dbg_threads(),
+            DbgSelectThread::NAME => ffi::izs_dbg_select_thread(p::<DbgSelectThread>(params)?.tid),
+            DbgModules::NAME => ffi::izs_dbg_modules(),
+            DbgStack::NAME => ffi::izs_dbg_stack(),
+            DbgSymbolize::NAME => {
+                let m: DbgSymbolize = p(params)?;
+                let list: Vec<String> = m.eas.iter().map(|e| format!("{e:X}")).collect();
+                ffi::izs_dbg_symbolize(cstr(&list.join(","))?.as_ptr())
+            }
+            DbgEval::NAME => ffi::izs_dbg_eval(cstr(&p::<DbgEval>(params)?.expr)?.as_ptr()),
+            DbgExceptions::NAME => ffi::izs_dbg_exceptions(),
+            DbgSetException::NAME => {
+                let m: DbgSetException = p(params)?;
+                ffi::izs_dbg_set_exception(m.code, m.stop, m.pass)
+            }
             other => return Err(format!("unknown method '{other}'")),
         };
         result(rc)
@@ -521,7 +629,24 @@ fn main() {
         }
     });
 
-    for text in rx {
+    // While a debuggee runs the loop wakes up between requests to poll the
+    // debugger for events; otherwise it blocks on stdin as before.
+    loop {
+        let text = if unsafe { ffi::izs_dbg_running() } != 0 {
+            match rx.recv_timeout(std::time::Duration::from_millis(5)) {
+                Ok(t) => t,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    unsafe { ffi::izs_dbg_poll() };
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(t) => t,
+                Err(_) => break,
+            }
+        };
         let req: Request = match serde_json::from_str(&text) {
             Ok(r) => r,
             Err(e) => {

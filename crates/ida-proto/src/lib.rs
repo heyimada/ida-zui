@@ -9,12 +9,14 @@
 //! surfaces both as log lines.
 
 pub mod client;
+pub mod debug;
 pub mod declerr;
 pub mod tags;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub use client::{Client, ClientError};
+pub use debug::*;
 
 pub type Ea = u64;
 pub const BADADDR: Ea = u64::MAX;
@@ -203,6 +205,45 @@ methods! {
     /// nothing, which the reply tries to tell apart from a silent success.
     PluginRun = "plugin_run" { plugin: String, arg: u64 } -> PluginRunReply;
     Proximity = "proximity" { ea: Ea, up: u32, down: u32, fanout: u32, max_nodes: u32, data: bool } -> ProximityGraph;
+
+    /// Starts the debuggee (`path` defaults to the input file). The database
+    /// is rebased to the runtime image base while the process lives.
+    DbgStart = "dbg_start" { path: Option<String>, args: String, cwd: String, options: DbgOptions } -> DbgStateInfo;
+    /// Running processes the debugger can attach to.
+    DbgProcesses = "dbg_processes" {} -> Vec<DbgProcess>;
+    DbgAttach = "dbg_attach" { pid: u32, options: DbgOptions } -> DbgStateInfo;
+    DbgDetach = "dbg_detach" {} -> DbgStateInfo;
+    DbgTerminate = "dbg_terminate" {} -> DbgStateInfo;
+    DbgState = "dbg_state" {} -> DbgStateInfo;
+    /// Resumes a suspended process. The call returns at once; the next stop
+    /// arrives as `debug` events (`state` with `suspended`).
+    DbgResume = "dbg_resume" { how: ResumeHow, ea: Ea } -> DbgStateInfo;
+    /// Asks a running process to suspend. A target that never reaches a safe
+    /// point yields a `pause_timeout` event after `timeout_ms`.
+    DbgPause = "dbg_pause" { timeout_ms: u32 } -> DbgStateInfo;
+    DbgBpts = "dbg_bpts" {} -> Vec<DbgBpt>;
+    /// Adds a breakpoint (`kind`: soft, exec, write, read, rw). `lang` is
+    /// the condition language (IDC or Python), empty for the default.
+    DbgBptAdd = "dbg_bpt_add" { ea: Ea, kind: String, size: u32, cond: String, lang: String } -> Vec<DbgBpt>;
+    DbgBptDel = "dbg_bpt_del" { ea: Ea } -> Vec<DbgBpt>;
+    DbgBptEnable = "dbg_bpt_enable" { ea: Ea, enabled: bool } -> Vec<DbgBpt>;
+    DbgBptCond = "dbg_bpt_cond" { ea: Ea, cond: String, lang: String } -> Vec<DbgBpt>;
+    /// Registers of the current thread (the general class, or all).
+    DbgRegs = "dbg_regs" { all: bool } -> Vec<DbgReg>;
+    DbgSetReg = "dbg_set_reg" { name: String, value: u64 } -> ();
+    /// Process memory; unreadable bytes read as `??` in `hex`.
+    DbgMemRead = "dbg_mem_read" { ea: Ea, len: u32 } -> DbgMem;
+    DbgMemWrite = "dbg_mem_write" { ea: Ea, hex: String } -> u32;
+    DbgThreads = "dbg_threads" {} -> Vec<DbgThread>;
+    DbgSelectThread = "dbg_select_thread" { tid: u32 } -> DbgStateInfo;
+    DbgModules = "dbg_modules" {} -> Vec<DbgModule>;
+    DbgStack = "dbg_stack" {} -> Vec<DbgFrame>;
+    /// `name`, `func+0xN` or `module+0xN` for each address, null if unknown.
+    DbgSymbolize = "dbg_symbolize" { eas: Vec<Ea> } -> Vec<Option<String>>;
+    /// An IDC expression (registers, names, numbers) as a number.
+    DbgEval = "dbg_eval" { expr: String } -> Ea;
+    DbgExceptions = "dbg_exceptions" {} -> Vec<DbgException>;
+    DbgSetException = "dbg_set_exception" { code: u32, stop: bool, pass: bool } -> Vec<DbgException>;
 }
 
 /// `plugin_t::flags` bits, as `PLUGIN_*` in loader.hpp.
@@ -496,6 +537,7 @@ pub enum HostEvent {
     },
     DbChanged(DbChanged),
     Analysis(AnalysisEvent),
+    Debug(DebugEvent),
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -518,6 +560,9 @@ pub struct DbInfo {
     pub bitness: u32,
     pub min_ea: Ea,
     pub max_ea: Ea,
+    /// The image base (moves while a process is being debugged).
+    #[serde(default)]
+    pub image_base: Ea,
     pub entry: Option<Ea>,
     pub hexrays: bool,
     pub file_type: String,
@@ -770,6 +815,10 @@ pub struct Pseudocode {
     pub func: Ea,
     pub name: String,
     pub lines: Vec<String>,
+    /// Per line, the addresses of the ctree items on it (empty for lines
+    /// that carry none), for markers from the debugger.
+    #[serde(default)]
+    pub line_eas: Vec<Vec<Ea>>,
     pub error: Option<String>,
 }
 

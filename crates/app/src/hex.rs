@@ -46,6 +46,11 @@ impl HexView {
                 this.pages.clear();
                 cx.notify();
             }
+            SessionEvent::DebugChanged => cx.notify(),
+            SessionEvent::Rebased => {
+                this.pages.clear();
+                this.load_segments(cx);
+            }
             SessionEvent::Closed => {
                 this.segs.clear();
                 this.pages.clear();
@@ -227,6 +232,7 @@ impl HexView {
                 let theme = Theme::get(cx);
                 let cw = code::char_width(window);
                 let v = entity.read(cx);
+                let marks = code::DebugMarks::read(v.session.read(cx));
                 let first = v.top.floor() as u64;
                 let frac = (v.top - v.top.floor()) as f32;
                 let rows = (f32::from(bounds.size.height) / line_height()).ceil() as usize + 1;
@@ -263,6 +269,34 @@ impl HexView {
                                         hsla(theme.raised)
                                     },
                                 ));
+                            }
+                        }
+                        // The instruction pointer and breakpoint bytes.
+                        let tints = marks
+                            .ip
+                            .map(|ip| (ip, hsla(theme.accent).opacity(0.45)))
+                            .into_iter()
+                            .chain(
+                                marks
+                                    .bpts
+                                    .iter()
+                                    .filter(|(_, on)| *on)
+                                    .map(|(ea, _)| (*ea, hsla(theme.danger).opacity(0.4))),
+                            );
+                        for (ea, color) in tints {
+                            if ea >= base && ea < base + ROW {
+                                let col = (ea - base) as f32;
+                                let hx = 20. + col * 3. + if col >= 8. { 1. } else { 0. };
+                                let ax = 20. + 51. + col;
+                                for (x, w) in [(hx, 2.), (ax, 1.)] {
+                                    window.paint_quad(gpui::fill(
+                                        Bounds::new(
+                                            point(bounds.left() + cw * x, y),
+                                            gpui::size(cw * w, px(line_height())),
+                                        ),
+                                        color,
+                                    ));
+                                }
                             }
                         }
                         let mut hex = String::with_capacity(52);
