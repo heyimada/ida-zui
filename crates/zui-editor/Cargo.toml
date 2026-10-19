@@ -1,0 +1,17 @@
+[package]
+name = "zui-editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Multi-line code editor view for zui (gpui) with IME, undo and pluggable highlighting"
+
+[dependencies]
+gpui.workspace = true
+unicode-segmentation = "1"
+
+[dev-dependencies]
+gpui_platform.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

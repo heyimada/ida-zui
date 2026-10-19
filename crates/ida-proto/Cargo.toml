@@ -1,0 +1,15 @@
+[package]
+name = "ida-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Wire protocol, host client and tagged-line parser for ida-zui"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
+
+[lints.rust]
+unsafe_code = "forbid"

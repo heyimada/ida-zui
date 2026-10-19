@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/ida-proto", "crates/ida-host", "crates/app", "crates/zui-editor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[workspace.dependencies]
+gpui = { git = "https://github.com/zeronsh/zui", rev = "1561532176f54262e360acbb8bc00c6fcf183975" }
+gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "1561532176f54262e360acbb8bc00c6fcf183975" }
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# ida-host needs the licensed IDA SDK, so CI builds and tests only the crates
+# that do not.
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy -p ida-proto -p zui-editor -p ida-zui --all-targets -- -D warnings
+      - name: Build
+        run: cargo build -p ida-zui
+      - name: Test
+        run: cargo test -p ida-proto -p zui-editor -p ida-zui

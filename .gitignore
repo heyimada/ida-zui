@@ -1,0 +1,15 @@
+/target
+# Licensed Hex-Rays SDK: extract it here locally, never commit it.
+/third_party/
+# IDA writes databases next to inputs.
+/testdata/
+# Generated captures and dumps (README screenshots live in docs/images).
+/artifacts/
+# IDA databases and binaries, wherever they end up.
+*.i64
+*.idb
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
