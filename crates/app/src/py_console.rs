@@ -8,7 +8,7 @@
 // Cancel button that raises KeyboardInterrupt in it.
 use crate::py_history::History;
 use crate::scrollbar::{self, Axes, Source};
-use crate::session::{Phase, Session};
+use crate::session::{Phase, Session, SessionEvent};
 use crate::settings;
 use crate::theme::{Theme, code_font_name, code_font_size, code_line_height, hsla};
 use crate::ui::{self, ButtonKind, spinner};
@@ -16,12 +16,12 @@ use gpui::{
     App, Context, Entity, Global, IntoElement, Render, ScrollStrategy, SharedString, Subscription,
     UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
-use ida_proto::{Interrupt, PyEval, PyReply, PyRunFile};
+use ida_proto::{Interrupt, PyComplete, PyEval, PyReply, PyRunFile};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
-use zui_editor::{Editor, EditorEvent, PythonHighlighter};
+use zui_editor::{Editor, EditorEvent, Pos, PythonHighlighter};
 
 /// Output kept in the list; older lines fall off the top.
 const MAX_LINES: usize = 20_000;
@@ -51,12 +51,30 @@ struct Line {
 
 struct Running {
     started: Instant,
+    /// The input, until it has been echoed: it is echoed with the first
+    /// streamed output (a statement that turns out incomplete never is).
+    echo: Option<String>,
+    /// Where streamed output starts, so those lines can be replaced by the
+    /// typed output the reply carries.
+    out_mark: Option<usize>,
     /// A script file rather than console input.
     file: bool,
 }
 
+/// Completion candidates on offer for the name that starts at `start`.
+struct Completions {
+    items: Vec<String>,
+    /// The candidate Tab last inserted, while cycling.
+    sel: Option<usize>,
+    start: Pos,
+}
+
 pub struct PyConsole {
     session: Entity<Session>,
+    completions: Option<Completions>,
+    /// The input text right after the completion edited it: that change does
+    /// not close the candidate list.
+    completed_text: Option<String>,
     input: Entity<Editor>,
     lines: Rc<Vec<Line>>,
     scroll: UniformListScrollHandle,
@@ -119,10 +137,37 @@ impl PyConsole {
                 this.on_editor(ev, cx)
             }),
             cx.observe(&session, |_, _, cx| cx.notify()),
+            cx.subscribe(&session, |this, _, ev: &SessionEvent, cx| {
+                // Output as it is produced; the reply replaces it with the
+                // same text split by stream.
+                if let SessionEvent::HostLog(lines) = ev
+                    && this.running.is_some()
+                {
+                    if let Some(src) = this.running.as_mut().and_then(|r| r.echo.take()) {
+                        this.echo(&src);
+                    }
+                    let at = this.lines.len();
+                    if let Some(r) = this.running.as_mut() {
+                        r.out_mark.get_or_insert(at);
+                    }
+                    for l in lines {
+                        this.push_text(
+                            Kind::Out,
+                            &format!(
+                                "{l}
+"
+                            ),
+                        );
+                    }
+                    cx.notify();
+                }
+            }),
         ];
         let history = history(cx);
         Self {
             session,
+            completions: None,
+            completed_text: None,
             input,
             lines: Rc::default(),
             scroll: UniformListScrollHandle::new(),
@@ -165,8 +210,85 @@ impl PyConsole {
                     self.input.update(cx, |e, cx| e.set_text_at_end(&text, cx));
                 }
             }
-            EditorEvent::Changed | EditorEvent::CursorMoved => cx.notify(),
+            EditorEvent::Complete => self.complete(cx),
+            EditorEvent::Changed => {
+                let text = self.input.read(cx).text();
+                if self.completed_text.as_deref() != Some(text.as_str()) {
+                    self.completions = None;
+                }
+                cx.notify();
+            }
+            EditorEvent::CursorMoved => cx.notify(),
         }
+    }
+
+    /// Tab after a name: offer completions, or step through the ones on offer.
+    fn complete(&mut self, cx: &mut Context<Self>) {
+        if self.running.is_some() || !self.session.read(cx).is_ready() {
+            return;
+        }
+        if let Some(c) = self.completions.as_mut()
+            && c.items.len() > 1
+        {
+            let next = c.sel.map_or(0, |i| (i + 1) % c.items.len());
+            c.sel = Some(next);
+            let (item, start) = (c.items[next].clone(), c.start);
+            self.replace_word(start, &item, cx);
+            return;
+        }
+        let text = self.input.read(cx).text();
+        let pos = self.input.read(cx).cursor();
+        let line = text.split('\n').nth(pos.line).unwrap_or("");
+        let word = completion_word(&line[..pos.col.min(line.len())]).to_owned();
+        if word.is_empty() {
+            self.input
+                .update(cx, |e, cx| e.insert_at_cursor("    ", cx));
+            return;
+        }
+        let start = Pos {
+            line: pos.line,
+            col: pos.col - word.len(),
+        };
+        let fut = self
+            .session
+            .read(cx)
+            .call(PyComplete { word: word.clone() });
+        cx.spawn(async move |this, cx| {
+            let items = fut.await.unwrap_or_default();
+            this.update(cx, |c, cx| c.offer(word, start, items, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// The candidates for `word` arrived: insert what is certain, list the rest.
+    fn offer(&mut self, word: String, start: Pos, items: Vec<String>, cx: &mut Context<Self>) {
+        // The caret moved on while the host was thinking.
+        let pos = self.input.read(cx).cursor();
+        if pos.line != start.line || pos.col != start.col + word.len() || items.is_empty() {
+            return;
+        }
+        let prefix = common_prefix(&items);
+        if prefix.len() > word.len() {
+            self.replace_word(start, &prefix, cx);
+        }
+        self.completions = (items.len() > 1).then_some(Completions {
+            items,
+            sel: None,
+            start,
+        });
+        cx.notify();
+    }
+
+    /// Replaces the text from `start` to the caret with `text`.
+    fn replace_word(&mut self, start: Pos, text: &str, cx: &mut Context<Self>) {
+        self.input.update(cx, |e, cx| {
+            let head = e.cursor();
+            e.set_selection(start, head, cx);
+            e.insert_at_cursor(text, cx);
+        });
+        self.completed_text = Some(self.input.read(cx).text());
+        cx.notify();
     }
 
     /// Enter (`force` false) or Ctrl+Enter: run the input, or continue it on a
@@ -197,6 +319,8 @@ impl PyConsole {
         let ea = self.session.read(cx).cursor;
         self.running = Some(Running {
             started: Instant::now(),
+            echo: Some(source.clone()),
+            out_mark: None,
             file: false,
         });
         self.session.update(cx, |s, cx| s.python_started(cx));
@@ -233,6 +357,8 @@ impl PyConsole {
         let ea = self.session.read(cx).cursor;
         self.running = Some(Running {
             started: Instant::now(),
+            echo: None,
+            out_mark: None,
             file: true,
         });
         self.session.update(cx, |s, cx| s.python_started(cx));
@@ -281,7 +407,13 @@ impl PyConsole {
         reply: Result<PyReply, String>,
         cx: &mut Context<Self>,
     ) {
-        self.running = None;
+        let run = self.running.take();
+        // Streamed lines give way to the reply's typed output.
+        if let Some(mark) = run.as_ref().and_then(|r| r.out_mark) {
+            let keep = mark.min(self.lines.len());
+            Rc::make_mut(&mut self.lines).truncate(keep);
+        }
+        let echoed = run.as_ref().is_some_and(|r| r.echo.is_none());
         match reply {
             Ok(r) if r.incomplete => {
                 self.session
@@ -293,7 +425,9 @@ impl PyConsole {
                 self.session
                     .update(cx, |s, cx| s.python_finished(r.changed, cx));
                 if let Some(src) = &source {
-                    self.echo(src);
+                    if !echoed {
+                        self.echo(src);
+                    }
                     self.remember(src, cx);
                     self.input.update(cx, |e, cx| e.set_text("", cx));
                 }
@@ -516,7 +650,36 @@ impl Render for PyConsole {
             .flex_col()
             .bg(hsla(t.surface))
             .child(
-                div().relative().flex_1().min_h_0().flex().flex_col().child(list).child(bar).when(self.lines.is_empty(), |d| {
+                div().relative().flex_1().min_h_0().flex().flex_col().child(list).child(bar).when_some(self.completions.as_ref(), |d, c| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .left(px(48.))
+                            .right(px(16.))
+                            .bottom(px(4.))
+                            .max_h(px(lh * 4. + 8.))
+                            .overflow_hidden()
+                            .flex()
+                            .flex_wrap()
+                            .gap_x(px(12.))
+                            .px(px(8.))
+                            .py(px(4.))
+                            .rounded(px(6.))
+                            .bg(hsla(t.surface2))
+                            .border_1()
+                            .border_color(hsla(t.border_strong))
+                            .font_family(code_font_name())
+                            .text_size(px(code_font_size()))
+                            .line_height(px(lh))
+                            .children(c.items.iter().enumerate().map(|(i, item)| {
+                                div()
+                                    .px(px(4.))
+                                    .rounded(px(3.))
+                                    .when(c.sel == Some(i), |d| d.bg(hsla(t.accent)).text_color(hsla(t.bg)))
+                                    .child(item.clone())
+                            })),
+                    )
+                }).when(self.lines.is_empty() && self.completions.is_none(), |d| {
                     d.child(
                         div()
                             .absolute()
@@ -578,5 +741,77 @@ impl Render for PyConsole {
                     )
                     .child(div().flex_1().min_w_0().h(px(lh * rows as f32 + 8.)).py(px(4.)).child(self.input.clone())),
             )
+    }
+}
+
+/// The dotted name ending at the caret, which is what Python's completer
+/// completes: `idaapi.get_f` in `x = idaapi.get_f`. Empty when the caret is
+/// not after a name (after `(`, a space, a digit run or a bare `.`).
+fn completion_word(prefix: &str) -> &str {
+    let start = prefix
+        .char_indices()
+        .rev()
+        .take_while(|&(_, c)| c.is_alphanumeric() || c == '_' || c == '.')
+        .last()
+        .map_or(prefix.len(), |(i, _)| i);
+    let word = &prefix[start..];
+    match word.chars().next() {
+        Some(c) if c.is_alphabetic() || c == '_' => word,
+        _ => "",
+    }
+}
+
+/// The longest text all `items` start with.
+fn common_prefix(items: &[String]) -> String {
+    let Some(first) = items.first() else {
+        return String::new();
+    };
+    let mut len = first.len();
+    for s in &items[1..] {
+        len = first
+            .bytes()
+            .zip(s.bytes())
+            .take(len)
+            .take_while(|(a, b)| a == b)
+            .count();
+    }
+    while !first.is_char_boundary(len) {
+        len -= 1;
+    }
+    first[..len].to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{common_prefix, completion_word};
+
+    #[test]
+    fn the_word_is_the_dotted_name_at_the_caret() {
+        assert_eq!(completion_word("idaapi.get_f"), "idaapi.get_f");
+        assert_eq!(completion_word("x = foo(bar"), "bar");
+        assert_eq!(completion_word("a.b.c."), "a.b.c.");
+        assert_eq!(completion_word("_priv"), "_priv");
+    }
+
+    #[test]
+    fn nothing_to_complete_after_punctuation_space_or_digits() {
+        assert_eq!(completion_word(""), "");
+        assert_eq!(completion_word("print("), "");
+        assert_eq!(completion_word("x = "), "");
+        assert_eq!(completion_word("1.5"), "");
+        assert_eq!(completion_word("x[0].na"), "");
+    }
+
+    #[test]
+    fn common_prefix_stops_at_the_first_difference() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            common_prefix(&v(&["get_func", "get_func_qty", "get_fchunk"])),
+            "get_f"
+        );
+        assert_eq!(common_prefix(&v(&["only"])), "only");
+        assert_eq!(common_prefix(&v(&["ab", "cd"])), "");
+        assert_eq!(common_prefix(&[]), "");
+        assert_eq!(common_prefix(&v(&["née", "nèe"])), "n");
     }
 }

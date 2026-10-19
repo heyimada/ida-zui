@@ -16,7 +16,7 @@ use ida_proto::tags::{self, Line};
 use ida_proto::{Ea, ListingChunk, ListingDown, ListingUp, Segments};
 
 const PAGE_LINES: u32 = 200;
-const MARGIN_ROWS: f32 = 60.;
+const MARGIN_ROWS: f32 = 100.;
 const MAX_ROWS: usize = 6000;
 const UNITS: f32 = 1_000_000.;
 
@@ -65,6 +65,9 @@ pub struct ListingView {
     /// Where a scrollbar drag points while the jump it asked for loads.
     drag_units: Option<f32>,
     pending_jump: Option<Ea>,
+    /// Rows of cursor movement (page keys) that outran the buffer; applied as
+    /// chunks arrive.
+    owed_rows: isize,
     /// Painted sizes: the text area's width and the widest visible line.
     text_w: f32,
     content_w: f32,
@@ -79,7 +82,7 @@ impl ListingView {
                 this.show(*ea, false, cx)
             }
             SessionEvent::Opened => this.load_segments(cx),
-            SessionEvent::Rebased => this.load_segments(cx),
+            SessionEvent::Rebased { .. } => this.load_segments(cx),
             SessionEvent::DebugChanged => cx.notify(),
             SessionEvent::Changed => this.refresh(cx),
             SessionEvent::Closed => {
@@ -109,6 +112,7 @@ impl ListingView {
             segs: SegMap::default(),
             drag_units: None,
             pending_jump: None,
+            owed_rows: 0,
             text_w: 0.,
             content_w: 0.,
             _subs: vec![sub],
@@ -279,6 +283,7 @@ impl ListingView {
     }
 
     fn jump(&mut self, ea: Ea, keep_screen_row: Option<f32>, cx: &mut Context<Self>) {
+        self.owed_rows = 0;
         self.generation += 1;
         let generation = self.generation;
         let s = self.session.read(cx);
@@ -386,6 +391,7 @@ impl ListingView {
                         v.top += n as f32;
                         v.cursor += n;
                         v.trim();
+                        v.apply_owed(cx);
                         cx.notify();
                     }
                 })
@@ -427,6 +433,7 @@ impl ListingView {
                         );
                         v.rows.extend(new);
                         v.trim();
+                        v.apply_owed(cx);
                         cx.notify();
                     }
                 })
@@ -473,13 +480,28 @@ impl ListingView {
         if self.rows.is_empty() {
             return;
         }
-        let max = self.rows.len() as isize - 1;
-        self.cursor = (self.cursor as isize + delta).clamp(0, max) as usize;
+        let (cursor, owed) = step_cursor(
+            self.cursor,
+            delta,
+            self.rows.len(),
+            !self.at_start,
+            !self.at_end,
+        );
+        self.cursor = cursor;
+        self.owed_rows += owed;
         self.caret_col = 0;
         self.ensure_visible(false);
         self.ensure_buffer(cx);
         self.publish_cursor(cx);
         cx.notify();
+    }
+
+    /// A chunk arrived: carry on with the movement that was waiting for it.
+    fn apply_owed(&mut self, cx: &mut Context<Self>) {
+        let owed = std::mem::take(&mut self.owed_rows);
+        if owed != 0 {
+            self.move_cursor(owed, cx);
+        }
     }
 
     fn publish_caret(&mut self, cx: &mut Context<Self>) {
@@ -796,5 +818,63 @@ impl Render for ListingView {
                         .child("Loading…"),
                 )
             })
+    }
+}
+
+/// Where a cursor move of `delta` rows lands in a buffer of `len` rows, and
+/// how many rows of it are still owed because the buffer ends before the
+/// database does (`more_above` / `more_below`): that remainder waits for the
+/// next chunk instead of being dropped.
+fn step_cursor(
+    cursor: usize,
+    delta: isize,
+    len: usize,
+    more_above: bool,
+    more_below: bool,
+) -> (usize, isize) {
+    if len == 0 {
+        return (0, 0);
+    }
+    let max = len as isize - 1;
+    let target = cursor as isize + delta;
+    let owed = if target < 0 && more_above {
+        target
+    } else if target > max && more_below {
+        target - max
+    } else {
+        0
+    };
+    (target.clamp(0, max) as usize, owed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::step_cursor;
+
+    #[test]
+    fn inside_the_buffer_nothing_is_owed() {
+        assert_eq!(step_cursor(100, -40, 400, true, true), (60, 0));
+        assert_eq!(step_cursor(100, 40, 400, true, true), (140, 0));
+    }
+
+    #[test]
+    fn a_page_up_past_the_top_owes_the_rest_while_more_exists_above() {
+        assert_eq!(step_cursor(10, -40, 400, true, false), (0, -30));
+    }
+
+    #[test]
+    fn a_page_up_at_the_real_start_owes_nothing() {
+        assert_eq!(step_cursor(10, -40, 400, false, false), (0, 0));
+    }
+
+    #[test]
+    fn a_page_down_past_the_end_owes_the_rest_while_more_exists_below() {
+        assert_eq!(step_cursor(390, 40, 400, false, true), (399, 31));
+        assert_eq!(step_cursor(390, 40, 400, false, false), (399, 0));
+    }
+
+    #[test]
+    fn an_empty_buffer_owes_nothing() {
+        assert_eq!(step_cursor(0, -40, 0, true, true), (0, 0));
     }
 }

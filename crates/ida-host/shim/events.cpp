@@ -472,6 +472,18 @@ static void emit_analysis(atype_t type, ea_t ea, int percent, bool done, bool fi
   ev_emit(j.s);
 }
 
+static std::atomic<bool> g_stop_auto(false);
+
+void ev_request_stop(void)
+{
+  g_stop_auto.store(true);
+}
+
+bool ev_stop_requested(void)
+{
+  return g_stop_auto.load();
+}
+
 void ev_run_auto(bool always)
 {
   const bool trace = qgetenv("IZS_AUTO_TRACE", nullptr);
@@ -493,7 +505,9 @@ void ev_run_auto(bool always)
   uint64_t steps = 0;
   // auto_make_step reports whether it did anything; asking auto_is_ok()
   // before every one of the ~10 million steps of a big DLL costs seconds.
-  while ( auto_make_step(0, BADADDR) )
+  // The stop flag is sticky: a stop that arrived while the loader was still
+  // running must not be lost, and the host is about to close anyway.
+  while ( !g_stop_auto.load() && auto_make_step(0, BADADDR) )
   {
     if ( (++steps & 63) != 0 )
       continue;
@@ -514,9 +528,13 @@ void ev_run_auto(bool always)
     emit_analysis(d.type, d.ea, percent, false, !announced, ms(t0));
     announced = true;
   }
-  auto_wait();
+  const bool stopped = g_stop_auto.load();
+  if ( stopped )
+    enable_auto(false);   // nothing may keep analysing while the database closes
+  else
+    auto_wait();
   if ( trace )
     qeprintf("auto: finished %lld ms after %llu steps\n", ms(t0), (unsigned long long)steps);
   if ( announced )
-    emit_analysis(AU_NONE, BADADDR, 100, true, false, ms(t0));
+    emit_analysis(stopped ? AU_UNK : AU_NONE, BADADDR, stopped ? percent : 100, true, false, ms(t0));
 }

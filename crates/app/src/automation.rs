@@ -10,12 +10,14 @@
 //   click <x> <y>        move, press and release the left button
 //   dblclick <x> <y>     a click followed by the second click of a double click
 //   confirm <n>          answer button n (1-based) of an in-app question
+//   drop <path>[|<path>..]  files dropped on the window, through gpui's file-drop events (what an OS drop becomes)
 //   marker <name>        appends <name> to <file>.done
 //   clipboard <text>     seeds the in-process clipboard (the system one is never used)
 //   clipdump             appends the in-process clipboard to <file>.done as `clipboard: <text>`
 use gpui::{
-    AnyWindowHandle, App, AppContext, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput, Window, point, px,
+    AnyWindowHandle, App, AppContext, ExternalPaths, FileDropEvent, Keystroke, Modifiers,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PlatformInput, Window, point, px,
 };
 use std::io::Write;
 use std::path::PathBuf;
@@ -180,6 +182,26 @@ fn run(line: &str, channel: &std::path::Path, window: &mut Window, cx: &mut App)
             }
             true
         }),
+        "drop" => {
+            let paths = ExternalPaths(
+                arg.split('|')
+                    .map(|p| PathBuf::from(p.trim()))
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .collect(),
+            );
+            if paths.paths().is_empty() {
+                return false;
+            }
+            let position = point(px(400.), px(300.));
+            for ev in [
+                FileDropEvent::Entered { position, paths },
+                FileDropEvent::Submit { position },
+                FileDropEvent::Exited,
+            ] {
+                window.dispatch_event(PlatformInput::FileDrop(ev), cx);
+            }
+            true
+        }
         "confirm" => match arg.trim().parse::<u8>() {
             Ok(n) if (1..=9).contains(&n) => {
                 window.dispatch_keystroke(Keystroke::parse(&n.to_string()).unwrap(), cx);

@@ -18,6 +18,8 @@ mod ffi {
         pub fn izs_begin_request(origin: i32);
         pub fn izs_end_request();
         pub fn izs_interrupt() -> i32;
+        pub fn izs_analysis_stop() -> i32;
+        pub fn izs_py_complete(word: *const c_char) -> i32;
         pub fn izs_py_eval(source: *const c_char, ea: u64, mode: i32, path: *const c_char) -> i32;
         pub fn izs_open(path: *const c_char, run_auto: bool, base: u64) -> i32;
         pub fn izs_version() -> i32;
@@ -428,6 +430,10 @@ fn dispatch(method: &str, params: &str) -> Result<String, String> {
                 let m: PyRunFile = p(params)?;
                 ffi::izs_py_eval(c"".as_ptr(), m.ea, 2, cstr(&m.path)?.as_ptr())
             }
+            PyComplete::NAME => {
+                let m: PyComplete = p(params)?;
+                ffi::izs_py_complete(cstr(&m.word)?.as_ptr())
+            }
             PluginList::NAME => ffi::izs_plugin_list(),
             PluginRun::NAME => {
                 let m: PluginRun = p(params)?;
@@ -604,9 +610,15 @@ fn main() {
             }
             let text = String::from_utf8_lossy(&line).trim_end().to_owned();
             if let Ok(req) = serde_json::from_str::<Request>(&text)
-                && req.method == Interrupt::NAME
+                && (req.method == Interrupt::NAME || req.method == AnalysisStop::NAME)
             {
-                let rc = unsafe { ffi::izs_interrupt() };
+                let rc = unsafe {
+                    if req.method == AnalysisStop::NAME {
+                        ffi::izs_analysis_stop()
+                    } else {
+                        ffi::izs_interrupt()
+                    }
+                };
                 let resp = if rc == 0 {
                     Response {
                         id: req.id,

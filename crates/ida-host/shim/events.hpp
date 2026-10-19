@@ -47,3 +47,9 @@ void ev_set_screen_ea(ea_t ea);
 // progress. With `always` the start and the end are reported even for a short
 // run (the initial analysis); otherwise only runs longer than ~100 ms are.
 void ev_run_auto(bool always);
+
+// Asks the analysis loop to stop between two steps. Callable from any thread
+// (the host's reader thread answers `analysis_stop`). Sticky: it stays set
+// until the host exits.
+void ev_request_stop(void);
+bool ev_stop_requested(void);

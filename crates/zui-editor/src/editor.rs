@@ -76,6 +76,10 @@ pub enum EditorEvent {
     HistoryPrev,
     /// Console mode: Down was pressed with the caret on the last line.
     HistoryNext,
+    /// Console mode: Tab was pressed with the caret right after a name
+    /// character; nothing was inserted. The host of the editor offers
+    /// completions (otherwise Tab indents).
+    Complete,
 }
 
 /// A parser error on whole lines (0-based, inclusive). The lines get a squiggle
@@ -261,6 +265,18 @@ impl Editor {
     /// first line / Down on the last emit the history events instead of moving.
     pub fn set_console_mode(&mut self, console: bool) {
         self.console = console;
+    }
+
+    /// The caret is a bare caret right after a letter, digit, `_` or `.`.
+    fn after_name_char(&self) -> bool {
+        let sel = self.doc.selection();
+        if sel.start != sel.end {
+            return false;
+        }
+        self.doc.line(sel.end.line)[..sel.end.col]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.')
     }
 
     /// Inserts a line break at the caret with the usual auto-indent.
@@ -773,7 +789,13 @@ impl Render for Editor {
                 }
             }))
             .on_action(cx.listener(|e, _: &InsertNewline, _, cx| e.edit(cx, Doc::newline)))
-            .on_action(cx.listener(|e, _: &Indent, _, cx| e.edit(cx, Doc::indent)))
+            .on_action(cx.listener(|e, _: &Indent, _, cx| {
+                if e.console && e.after_name_char() {
+                    cx.emit(EditorEvent::Complete);
+                } else {
+                    e.edit(cx, Doc::indent);
+                }
+            }))
             .on_action(cx.listener(|e, _: &Outdent, _, cx| e.edit(cx, Doc::outdent)))
             .on_action(cx.listener(|e, _: &Backspace, _, cx| e.edit(cx, Doc::backspace)))
             .on_action(cx.listener(|e, _: &Delete, _, cx| e.edit(cx, Doc::delete)))

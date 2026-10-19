@@ -20,6 +20,10 @@ use ida_proto::{Ea, EdgeKind, Graph};
 const PAD: f32 = 8.;
 /// Block header strip: the address and the block number.
 const HEAD: f32 = 24.;
+/// Smallest zoom (3%), so a function of hundreds of blocks fits on screen.
+const MIN_ZOOM: f32 = 0.03;
+/// Below this zoom blocks are drawn as plain boxes: the text would be unreadable.
+const TEXT_ZOOM: f32 = 0.3;
 /// Height of the strip with the zoom controls and the edge legend.
 const HEADER_H: f32 = 32.;
 
@@ -453,7 +457,7 @@ impl GraphView {
     }
 
     fn zoom_at(&mut self, factor: f32, at: Option<Point<Pixels>>) {
-        let new = (self.zoom * factor).clamp(0.15, 3.);
+        let new = (self.zoom * factor).clamp(MIN_ZOOM, 3.);
         let anchor = at
             .or_else(|| self.bounds.map(|b| b.center()))
             .and_then(|p| self.bounds.map(|b| p - b.origin));
@@ -565,7 +569,7 @@ impl GraphView {
             Some((mm, _)) => h - f32::from(mm.size.height) - 12. - MINIMAP_GAP,
             None => h,
         };
-        let z = ((w - 48.) / gw).min((h - 48.) / gh).clamp(0.15, 1.);
+        let z = ((w - 48.) / gw).min((h - 48.) / gh).clamp(MIN_ZOOM, 1.);
         self.zoom = z;
         self.pan = point(px((w - gw * z) / 2.), px((h - gh * z) / 2.));
     }
@@ -665,7 +669,12 @@ impl GraphView {
                         window.paint_quad(gpui::quad(
                             rect,
                             px(6. * zoom),
-                            hsla(theme.surface),
+                            // Without text the box is all there is to see: give it a body.
+                            hsla(if zoom < TEXT_ZOOM {
+                                theme.surface2
+                            } else {
+                                theme.surface
+                            }),
                             px(if current { 1.5 } else { 1. }),
                             hsla(if current {
                                 theme.accent
@@ -685,7 +694,7 @@ impl GraphView {
                             ),
                             hsla(theme.surface2),
                         ));
-                        if zoom >= 0.35 {
+                        if zoom >= TEXT_ZOOM {
                             let small = px((11. * zoom).max(6.));
                             let note_h = px(11. * zoom * 1.4);
                             let hy = origin.y + px((head_h - 11. * zoom * 1.4) / 2.);
@@ -754,7 +763,7 @@ impl GraphView {
                                     }),
                                 ));
                             }
-                            if zoom < 0.35 {
+                            if zoom < TEXT_ZOOM {
                                 continue; // too small to read; boxes and edges only
                             }
                             let font = code::code_font();

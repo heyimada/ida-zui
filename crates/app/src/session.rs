@@ -75,7 +75,11 @@ pub enum SessionEvent {
     DebugStopped,
     /// The database moved to match the process (or back); every address
     /// the view holds is stale.
-    Rebased,
+    Rebased {
+        delta: i64,
+    },
+    /// IDA printed these lines (the host sends them while a request still runs).
+    HostLog(Vec<String>),
     Closed,
 }
 
@@ -171,8 +175,9 @@ impl Session {
     /// nobody asked the UI to refresh, i.e. scripts, are handled here.
     fn on_host_event(&mut self, ev: HostEvent, cx: &mut Context<Self>) {
         match ev {
-            // Delivered through the log channel as well.
-            HostEvent::Log { .. } => {}
+            // The Output panel reads the log channel; the Python console wants
+            // the lines as they come while a script runs.
+            HostEvent::Log { lines } => cx.emit(SessionEvent::HostLog(lines)),
             HostEvent::Analysis(a) => {
                 self.analysis = (!a.done).then_some(a);
                 cx.notify();
@@ -265,6 +270,13 @@ impl Session {
     /// True when no host is running, so there is nothing to close.
     pub fn client_is_none(&self) -> bool {
         self.client.is_none()
+    }
+
+    /// An auto-analysis is running: the initial one while the database opens,
+    /// or one an edit started.
+    pub fn analyzing(&self) -> bool {
+        self.client.is_some()
+            && (matches!(self.phase, Phase::Loading { .. }) || self.analysis.is_some())
     }
 
     pub fn is_ready(&self) -> bool {
@@ -365,6 +377,11 @@ impl Session {
         };
         cx.spawn(async move |this, cx| {
             let result = open.await;
+            // The database was closed (the analysis was stopped) while the
+            // open was in flight: its reply is of no interest any more.
+            if this.update(cx, |s, _| s.client.is_none()).unwrap_or(true) {
+                return;
+            }
             // The columns are set before the first listing line is fetched.
             if result.is_ok()
                 && let Ok(set) = this.update(cx, |s, _| {
@@ -675,7 +692,13 @@ impl Session {
     /// acknowledged and exited. A host that does not answer within
     /// `CLOSE_TIMEOUT` is killed so it cannot block the caller forever.
     pub fn close(&mut self, save: bool, cx: &mut Context<Self>) -> Task<()> {
+        let analyzing = self.analyzing();
         let client = self.client.take();
+        // A running analysis is asked to stop between two steps, so the host
+        // reaches the close request in moments instead of after the whole run.
+        if analyzing && let Some(c) = &client {
+            drop(c.call(ida_proto::AnalysisStop {}));
+        }
         let fut = client.as_ref().map(|c| c.call(ida_proto::Close { save }));
         self.phase = Phase::Empty;
         self.info = None;

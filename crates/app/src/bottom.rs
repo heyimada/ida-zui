@@ -11,9 +11,11 @@ use crate::table::InlineEdit;
 use crate::theme::{Theme, code_font_name, hsla};
 use crate::ui::{self, BadgeKind};
 use gpui::{
-    Context, Entity, EventEmitter, IntoElement, Render, SharedString, Subscription, Window, div,
-    prelude::*, px,
+    Context, Entity, EventEmitter, IntoElement, Render, SharedString, Subscription, Window, canvas,
+    deferred, div, prelude::*, px,
 };
+use std::cell::Cell;
+use std::rc::Rc;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BottomTab {
@@ -119,6 +121,10 @@ pub struct BottomPanel {
     edit: Option<(EditKind, InlineEdit)>,
     /// The debugger revision the events log last scrolled for.
     events_seen: std::cell::Cell<u64>,
+    /// Width of the tab strip as last painted; tabs that do not fit fold into
+    /// a menu.
+    strip_w: Rc<Cell<f32>>,
+    tab_menu: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -132,6 +138,70 @@ const COLS: [(&str, Option<f32>); 4] = [
 ];
 
 impl BottomPanel {
+    /// The chevron behind which the tabs that do not fit wait.
+    fn tab_overflow(
+        &self,
+        hidden: &[BottomTab],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let t = *theme;
+        let open = self.tab_menu;
+        let menu = open.then(|| {
+            deferred(
+                div().absolute().top(px(30.)).left(px(0.)).child(
+                    div()
+                        .occlude()
+                        .min_w(px(150.))
+                        .p(px(4.))
+                        .rounded(px(8.))
+                        .bg(hsla(t.popover))
+                        .border_1()
+                        .border_color(hsla(t.border_strong))
+                        .shadow(ui::drop_shadow(&t, 8., 24.))
+                        .on_mouse_down_out(cx.listener(|v, _, _, cx| {
+                            v.tab_menu = false;
+                            cx.notify();
+                        }))
+                        .children(hidden.iter().map(|tab| {
+                            let tab = *tab;
+                            div()
+                                .id(SharedString::from(format!("more-tab-{}", tab.label())))
+                                .h(px(28.))
+                                .px(px(10.))
+                                .flex()
+                                .items_center()
+                                .rounded(px(4.))
+                                .text_size(px(12.))
+                                .cursor_pointer()
+                                .text_color(hsla(t.text))
+                                .hover(move |d| d.bg(hsla(t.hover)))
+                                .on_click(cx.listener(move |v, _, _, cx| {
+                                    v.tab_menu = false;
+                                    v.tab = tab;
+                                    v.selected = None;
+                                    v.edit = None;
+                                    cx.emit(BottomEvent::TabChanged);
+                                    cx.notify();
+                                }))
+                                .child(tab.label())
+                        })),
+                ),
+            )
+        });
+        div()
+            .relative()
+            .child(
+                ui::icon_button("tabs-more", "chevron-down", 24., open, true, &t)
+                    .tooltip(ui::tip("More tabs", None))
+                    .on_click(cx.listener(|v, _, _, cx| {
+                        v.tab_menu = !v.tab_menu;
+                        cx.notify();
+                    })),
+            )
+            .children(menu)
+    }
+
     pub fn new(
         session: Entity<Session>,
         focus: Entity<Focus>,
@@ -156,6 +226,8 @@ impl BottomPanel {
             selected: None,
             edit: None,
             events_seen: std::cell::Cell::new(0),
+            strip_w: Rc::new(Cell::new(0.)),
+            tab_menu: false,
             _subs: subs,
         }
     }
@@ -394,6 +466,65 @@ impl Render for BottomPanel {
             &[BottomTab::Breakpoints]
         };
         tabs.extend(debug_tabs.iter().map(|t| Some(*t)));
+        // Tabs that do not fit fold into a menu behind a chevron.
+        let py_busy = self.console.read(cx).is_running();
+        let real: Vec<BottomTab> = tabs.iter().flatten().copied().collect();
+        let widths: Vec<f32> = real
+            .iter()
+            .map(|tab| {
+                tab_width(
+                    tab.label(),
+                    (*tab == BottomTab::Xrefs && count > 0)
+                        || (*tab == BottomTab::Breakpoints && bpt_count > 0)
+                        || (*tab == BottomTab::Python && py_busy),
+                )
+            })
+            .collect();
+        let active_ix = real.iter().position(|t| *t == self.tab).unwrap_or(0);
+        let strip_w = self.strip_w.get();
+        let reserve = STRIP_RESERVE
+            + if self.tab == BottomTab::Python {
+                56.
+            } else {
+                0.
+            }
+            + if self.tab == BottomTab::Xrefs && !target.is_empty() {
+                260.
+            } else {
+                0.
+            };
+        let mut show = vec![true; real.len()];
+        if strip_w > 0. {
+            let avail = (strip_w - reserve).max(0.);
+            show = fit_tabs(&widths, active_ix, avail);
+            if show.iter().any(|s| !s) {
+                show = fit_tabs(&widths, active_ix, (avail - MORE_BUTTON).max(0.));
+            }
+        }
+        let hidden: Vec<BottomTab> = real
+            .iter()
+            .zip(&show)
+            .filter(|(_, s)| !**s)
+            .map(|(t, _)| *t)
+            .collect();
+        {
+            let mut it = show.iter();
+            tabs.retain(|e| e.is_none() || *it.next().unwrap_or(&true));
+            // A divider only between two groups that both still show.
+            let mut cleaned: Vec<Option<BottomTab>> = Vec::new();
+            for e in tabs.drain(..) {
+                if e.is_none()
+                    && (cleaned.is_empty() || cleaned.last().is_some_and(|l| l.is_none()))
+                {
+                    continue;
+                }
+                cleaned.push(e);
+            }
+            if cleaned.last().is_some_and(|l| l.is_none()) {
+                cleaned.pop();
+            }
+            tabs = cleaned;
+        }
         let body = match self.tab {
             BottomTab::Output => self.render_output(&t, window, cx),
             BottomTab::Xrefs => self.render_xrefs(&t, window, cx),
@@ -420,6 +551,7 @@ impl Render for BottomPanel {
                 div()
                     .h(px(32.))
                     .flex_none()
+                    .relative()
                     .flex()
                     .items_center()
                     .bg(hsla(t.bg))
@@ -471,6 +603,9 @@ impl Render for BottomPanel {
                             })
                             .into_any_element()
                     }))
+                    .when(!hidden.is_empty(), |d| {
+                        d.child(self.tab_overflow(&hidden, &t, cx))
+                    })
                     .child(div().flex_1())
                     .when(self.tab == BottomTab::Python, |d| {
                         d.child(
@@ -497,7 +632,7 @@ impl Render for BottomPanel {
                     .when(self.tab == BottomTab::Xrefs && !target.is_empty(), |d| {
                         d.child(
                             div()
-                                .max_w(px(480.))
+                                .max_w(px(260.))
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_ellipsis()
@@ -505,6 +640,23 @@ impl Render for BottomPanel {
                                 .text_color(hsla(t.muted))
                                 .child(format!("Xrefs to {target}")),
                         )
+                    })
+                    .child({
+                        // Measures the strip so tabs can fold into the menu.
+                        let width = self.strip_w.clone();
+                        let view = cx.entity();
+                        canvas(
+                            move |bounds, _, cx| {
+                                let w = f32::from(bounds.size.width);
+                                if (width.get() - w).abs() > 2. {
+                                    width.set(w);
+                                    view.update(cx, |_, cx| cx.notify());
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full()
                     })
                     .child(div().w(px(4.)))
                     .child(
@@ -514,5 +666,86 @@ impl Render for BottomPanel {
                     .child(div().w(px(8.))),
             )
             .child(body)
+    }
+}
+
+/// Room taken by the strip's right-hand controls (close button, margins).
+const STRIP_RESERVE: f32 = 44.;
+/// Width of the "more tabs" button.
+const MORE_BUTTON: f32 = 32.;
+
+/// Which of `widths` (tab widths, in order) stay on the strip in `avail`
+/// pixels: the leading ones that fit, with the `active` tab always shown (the
+/// tabs after the last one that fits give way to it).
+fn fit_tabs(widths: &[f32], active: usize, avail: f32) -> Vec<bool> {
+    let mut show = vec![false; widths.len()];
+    let mut used = 0.;
+    for (i, w) in widths.iter().enumerate() {
+        if used + w > avail {
+            break;
+        }
+        used += w;
+        show[i] = true;
+    }
+    if active < widths.len() && !show[active] {
+        // Make room for the active tab by dropping from the end.
+        let need = widths[active];
+        let mut i = show.iter().rposition(|&s| s);
+        while let Some(last) = i {
+            if used + need <= avail {
+                break;
+            }
+            show[last] = false;
+            used -= widths[last];
+            i = show.iter().rposition(|&s| s);
+        }
+        show[active] = true;
+    }
+    show
+}
+
+/// A rough width for a tab: its label, padding and the badge it may carry.
+fn tab_width(label: &str, badge: bool) -> f32 {
+    label.chars().count() as f32 * 7. + 24. + if badge { 24. } else { 0. }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_tabs;
+
+    #[test]
+    fn everything_shows_when_it_fits() {
+        assert_eq!(fit_tabs(&[50., 50., 50.], 0, 200.), vec![true; 3]);
+        assert!(fit_tabs(&[], 0, 100.).is_empty());
+    }
+
+    #[test]
+    fn the_leading_tabs_stay_and_the_rest_fold() {
+        assert_eq!(
+            fit_tabs(&[50., 50., 50., 50.], 0, 120.),
+            vec![true, true, false, false]
+        );
+    }
+
+    #[test]
+    fn the_active_tab_is_always_shown_at_the_cost_of_the_last_visible_ones() {
+        // Exceptions (last) is active: it takes the place of the tabs before it.
+        assert_eq!(
+            fit_tabs(&[50., 50., 50., 50.], 3, 120.),
+            vec![true, false, false, true]
+        );
+        // A wide active tab pushes out more than one.
+        assert_eq!(
+            fit_tabs(&[40., 40., 40., 90.], 3, 130.),
+            vec![true, false, false, true]
+        );
+    }
+
+    #[test]
+    fn an_active_tab_wider_than_the_strip_is_still_shown() {
+        assert_eq!(
+            fit_tabs(&[50., 50., 300.], 2, 100.),
+            vec![false, false, true]
+        );
     }
 }

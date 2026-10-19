@@ -192,7 +192,7 @@ impl Session {
                 }
                 s.revision += 1;
                 s.reload_lists(cx);
-                cx.emit(SessionEvent::Rebased);
+                cx.emit(SessionEvent::Rebased { delta });
                 let ea = s.cursor;
                 cx.emit(SessionEvent::Navigated { ea });
                 s.dbg_changed(cx);

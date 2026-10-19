@@ -173,6 +173,34 @@ static int db_info()
 // base == BADADDR keeps the loader's addresses. A rebase has to happen
 // before analysis, so with one the database is opened without analysis and
 // the queue is run afterwards.
+// Display preferences ida-zui changes in the kernel's `inf` (listing columns,
+// the address prefix). They are put back before the database is written, so
+// they never leak into the user's .i64.
+static struct
+{
+  bool have = false;
+  uchar indent = 0;
+  uchar cmt_indent = 0;
+  bool show_pref = false;
+} g_orig_prefs;
+
+static void remember_original_prefs()
+{
+  g_orig_prefs.indent = inf_get_indent();
+  g_orig_prefs.cmt_indent = inf_get_cmt_indent();
+  g_orig_prefs.show_pref = inf_show_line_pref();
+  g_orig_prefs.have = true;
+}
+
+static void restore_original_prefs()
+{
+  if ( !g_orig_prefs.have )
+    return;
+  inf_set_indent(g_orig_prefs.indent);
+  inf_set_cmt_indent(g_orig_prefs.cmt_indent);
+  inf_set_show_line_pref(g_orig_prefs.show_pref);
+}
+
 int izs_open(const char *utf8_path, bool run_auto, uint64_t base)
 {
   GUARD_BEGIN
@@ -189,6 +217,7 @@ int izs_open(const char *utf8_path, bool run_auto, uint64_t base)
   if ( rc != 0 )
     return fail("open_database failed with code %d", rc);
   g_open = true;
+  remember_original_prefs();
   if ( rebase )
   {
     adiff_t delta = (adiff_t)base - (adiff_t)inf_get_min_ea();
@@ -259,7 +288,16 @@ int izs_save(void)
     return fail("a debugging session is active; terminate it before saving");
   if ( dbg_db_rebased() )
     return fail("the database is rebased to a debuggee; not saving");
-  if ( !save_database(nullptr, 0) )
+  // Our display columns are applied again once the file is written.
+  const uchar indent = inf_get_indent();
+  const uchar cmt_indent = inf_get_cmt_indent();
+  const bool show_pref = inf_show_line_pref();
+  restore_original_prefs();
+  const bool saved = save_database(nullptr, 0);
+  inf_set_indent(indent);
+  inf_set_cmt_indent(cmt_indent);
+  inf_set_show_line_pref(show_pref);
+  if ( !saved )
     return fail("save_database failed");
   return ok_null();
   GUARD_END
@@ -289,6 +327,8 @@ void izs_close(bool save)
     if ( g_hexrays )
       term_hexrays_plugin();
     ev_unhook_idb();
+    if ( save )
+      restore_original_prefs();
     close_database(save);
     g_open = false;
   }

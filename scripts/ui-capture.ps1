@@ -15,13 +15,16 @@
 #   click:<x>,<y>      move + left click, same coordinates
 #   dblclick:<x>,<y>   click twice, the second with click count 2
 #   confirm:<n>        answer button n (1-based) of an in-app question
+#   drop:<path>[|<path>]  simulate files dropped on the window (in-process, via gpui's file-drop events)
 #   clipboard:<text>   seed the app's in-process clipboard (the system clipboard is never touched)
 #   clipdump           print the in-process clipboard (and log it)
 #   marker:<name>      wait until the app has executed everything queued so far
 #   shot:<name>        save the window as artifacts/ui/<name>.png
 #   close              post WM_CLOSE (no focus change), waitexit:<ms>, files:<glob>
 #   procs              list the ida-host.exe processes that are children of the app (their PIDs are remembered)
-#   hostsgone          report whether the hosts remembered by the last `procs` are still running
+#   hostsgone[:<ms>]   wait up to <ms> (default 20000) for the hosts remembered by `procs` to exit while the app is
+#                      still running; FAILS the script (exit 1) if one is left, or if the app itself already
+#                      exited (a host also dies with its parent, so that check would prove nothing)
 # Coordinates are logical pixels; the PNG is physical pixels (scale in artifacts/ui/scale.txt).
 # Switches: -NoFile (start on the welcome screen), -Reuse (keep work dir, settings and .i64),
 # -Settings '<json>' (seed settings.json), -Release, -Keep, -Log NAME (step log to artifacts/ui/NAME.txt),
@@ -59,6 +62,7 @@ foreach ($smp in $Samples) {
     $copies += $c
 }
 $hostPids = @()
+$failed = $false
 # Settings live in the work dir so captures never touch the user's own.
 $config = Join-Path $work "config"
 New-Item -ItemType Directory -Force $config | Out-Null
@@ -158,6 +162,7 @@ try {
             "click" { Send ("click " + ($arg -replace ",", " ")) }
             "dblclick" { Send ("dblclick " + ($arg -replace ",", " ")) }
             "clipboard" { Send "clipboard $arg" }
+            "drop" { Send "drop $arg" }
             "clipdump" {
                 Send "clipdump"
                 Send "marker clipdump-sync"
@@ -198,8 +203,21 @@ try {
                 Note "ida-host children of pid $($proc.Id): $($kids.Count) [$($kids -join ', ')]"
             }
             "hostsgone" {
-                $alive = @($hostPids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
-                Note "remembered hosts [$($hostPids -join ', ')]: still running = $($alive.Count) [$($alive -join ', ')]"
+                if ($proc.HasExited) {
+                    Note "FAIL hostsgone: the app has already exited, so hosts would exit with it; run this step while the app is alive"
+                    $failed = $true
+                    break
+                }
+                $limit = if ($arg) { [int]$arg } else { 20000 }
+                $until = (Get-Date).AddMilliseconds($limit)
+                do {
+                    $alive = @($hostPids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+                    if ($alive.Count -eq 0) { break }
+                    Start-Sleep -Milliseconds 200
+                } while ((Get-Date) -lt $until)
+                Note "remembered hosts [$($hostPids -join ', ')]: still running = $($alive.Count) [$($alive -join ', ')], app alive = $(-not $proc.HasExited)"
+                if ($hostPids.Count -eq 0) { Note "FAIL hostsgone: no host was remembered (run procs first)"; $failed = $true }
+                elseif ($alive.Count -gt 0) { Note "FAIL hostsgone: host processes outlived their tabs"; $failed = $true }
             }
             "close" {
                 [Win]::PostMessage($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
@@ -221,3 +239,4 @@ finally {
     if ($Log) { $logLines | Set-Content (Join-Path $out "$Log.txt") }
     if (-not $Keep) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
 }
+if ($failed) { exit 1 }

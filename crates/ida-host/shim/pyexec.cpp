@@ -68,6 +68,25 @@ def _izs_complete(b64):
     except (SyntaxError, ValueError, OverflowError):
         return '1'
 
+def _izs_completions(b64):
+    import rlcompleter as _rl
+    word = _izs_src(b64)
+    items = []
+    if word.strip():
+        comp = _rl.Completer(_s.modules['__main__'].__dict__)
+        i = 0
+        while len(items) < 200:
+            try:
+                r = comp.complete(word, i)
+            except Exception:
+                break
+            if r is None:
+                break
+            # rlcompleter marks callables with a trailing '(' or '()', keywords with ' '.
+            items.append(r.rstrip('( )'))
+            i += 1
+    return _json.dumps(sorted(set(items)))
+
 def _izs_run(b64, mode, path):
     g = _s.modules['__main__'].__dict__
     chunks = []
@@ -186,6 +205,29 @@ struct TidScope
 
 extern "C" {
 
+// The completions of the dotted name `word`, as a JSON array of strings.
+int izs_py_complete(const char *word)
+{
+  REQUIRE_DB();
+  GUARD_BEGIN
+  extlang_object_t py = find_extlang_by_name("Python");
+  if ( py == nullptr )
+    return fail("the Python extension language is not available");
+  qstring err;
+  if ( !g_runner )
+  {
+    if ( !py->eval_snippet(RUNNER, &err) )
+      return fail("cannot install the Python runner: %s", err.c_str());
+    g_runner = true;
+  }
+  qstring out;
+  if ( !py_call(py, "_izs_out = _izs_completions('" + base64(word) + "')", "_izs_out", &out, &err) )
+    return fail("%s", err.c_str());
+  g_result.assign(out.c_str(), out.length());
+  return 0;
+  GUARD_END
+}
+
 // mode: 0 = console, run only a complete statement; 1 = console, run what
 // there is; 2 = run the script file `path`.
 int izs_py_eval(const char *source, uint64_t ea, int mode, const char *path)
@@ -247,6 +289,13 @@ int izs_interrupt(void)
 {
   unsigned long tid = g_py_tid.load();
   return tid != 0 ? izs_py_interrupt(tid) : 1;
+}
+
+// Asks the analysis loop to stop between two steps. Safe from any thread.
+int izs_analysis_stop(void)
+{
+  ev_request_stop();
+  return 0;
 }
 
 }

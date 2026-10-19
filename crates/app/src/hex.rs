@@ -47,7 +47,7 @@ impl HexView {
                 cx.notify();
             }
             SessionEvent::DebugChanged => cx.notify(),
-            SessionEvent::Rebased => {
+            SessionEvent::Rebased { .. } => {
                 this.pages.clear();
                 this.load_segments(cx);
             }

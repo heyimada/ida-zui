@@ -12,6 +12,65 @@ pub struct DeclError {
     pub message: String,
 }
 
+/// One top-level declaration of a text: its byte range (leading comments
+/// included, the closing `;` too) and the 0-based line it starts on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeclSpan {
+    pub start: usize,
+    pub end: usize,
+    pub first_line: usize,
+}
+
+/// Splits `decl` into its top-level declarations, so each can be given to the
+/// parser alone and its messages attributed to its own lines.
+pub fn split_declarations(decl: &str) -> Vec<DeclSpan> {
+    let masked = mask_comments(decl);
+    let mut spans = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let push = |start: usize, end: usize, spans: &mut Vec<DeclSpan>| {
+        // A tail of comments and blanks is not a declaration.
+        if masked[start..end].trim().is_empty() {
+            return;
+        }
+        spans.push(DeclSpan {
+            start,
+            end,
+            first_line: decl[..start].matches('\n').count(),
+        });
+    };
+    for (i, ch) in masked.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ';' if depth == 0 => {
+                push(start, i + 1, &mut spans);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    push(start, decl.len(), &mut spans);
+    // Start each span at its first line with anything on it (comments count),
+    // not at the newline that ended the previous statement.
+    for s in &mut spans {
+        let lead = decl[s.start..s.end].len() - decl[s.start..s.end].trim_start().len();
+        s.start += lead;
+        s.first_line = decl[..s.start].matches('\n').count();
+    }
+    spans
+}
+
+/// Like `locate`, for the messages the parser printed for the one declaration
+/// `span` of `decl`: every line is inside that declaration.
+pub fn locate_in(decl: &str, span: &DeclSpan, messages: &str) -> Vec<DeclError> {
+    let mut errors = locate(&decl[span.start..span.end], messages);
+    for e in &mut errors {
+        e.line += span.first_line;
+    }
+    errors
+}
+
 const SYNTAX: &str = "Syntax error near: ";
 
 /// Locates each message in `messages` (one per line) inside `decl`.

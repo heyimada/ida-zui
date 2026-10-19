@@ -186,6 +186,12 @@ impl ProximityView {
         me
     }
 
+    /// The database moved by `delta` (a debugger rebase): follow it.
+    pub fn rebase(&mut self, delta: i64, cx: &mut Context<Self>) {
+        self.centre = crate::debugger::shift(self.centre, delta);
+        self.load(cx);
+    }
+
     /// Fetches the neighbourhood of the centre afresh (expansions are dropped).
     fn load(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;

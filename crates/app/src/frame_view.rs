@@ -127,6 +127,13 @@ impl FrameView {
         me
     }
 
+    /// The database moved by `delta` (a debugger rebase): follow it.
+    pub fn rebase(&mut self, delta: i64, cx: &mut Context<Self>) {
+        self.func = crate::debugger::shift(self.func, delta);
+        self.edit = None;
+        self.reload(cx);
+    }
+
     fn reload(&mut self, cx: &mut Context<Self>) {
         let fut = self.session.read(cx).call(FrameInfo { func: self.func });
         cx.spawn(async move |this, cx| {

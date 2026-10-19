@@ -14,6 +14,74 @@ use gpui::{
 use ida_proto::client::HostConfig;
 use ida_proto::{Client, Version, VersionInfo};
 
+/// The versions and paths shown by About: IDA's from the host. Asks the open
+/// database's host, or starts a throwaway one when nothing is open.
+pub fn fetch_version(
+    session: &Entity<Session>,
+    cx: &App,
+) -> impl std::future::Future<Output = Result<VersionInfo, SharedString>> + 'static + use<> {
+    let running = session.read(cx).call(Version {});
+    let transient = if session.read(cx).client_is_none() {
+        Client::spawn(&HostConfig::discover())
+            .map(|(c, _logs)| c)
+            .map_err(|e| e.to_string())
+            .ok()
+    } else {
+        None
+    };
+    let fut = transient.as_ref().map(|c| c.call(Version {}));
+    async move {
+        let result = match fut {
+            Some(f) => f.await,
+            None => running.await,
+        };
+        if let Some(c) = transient {
+            c.kill();
+        }
+        result.map_err(|e| e.to_string().into())
+    }
+}
+
+/// The About rows: ida-zui's own, then IDA's once the host has answered.
+pub fn about_rows(
+    theme: &Theme,
+    info: Option<&Result<VersionInfo, SharedString>>,
+) -> Vec<gpui::Div> {
+    let theme = *theme;
+    let row = move |label: &'static str, value: String| {
+        div()
+            .flex()
+            .gap(px(12.))
+            .child(
+                div()
+                    .w(px(110.))
+                    .flex_none()
+                    .text_color(hsla(theme.muted))
+                    .child(label),
+            )
+            .child(div().flex_1().min_w_0().child(value))
+    };
+    let mut rows = vec![
+        row("ida-zui", env!("CARGO_PKG_VERSION").to_owned()),
+        row("Settings", settings::settings_path().display().to_string()),
+    ];
+    match info {
+        None => rows.push(row("IDA", "asking the IDA host…".to_owned())),
+        Some(Ok(v)) => {
+            rows.push(row("IDA", v.ida_version.clone()));
+            rows.push(row("IDADIR", v.ida_dir.clone()));
+            rows.push(row("IDA user dir", v.user_dir.clone()));
+            rows.push(row("SDK", v.sdk_dir.clone()));
+            rows.push(row("Host", v.host_exe.clone()));
+        }
+        Some(Err(e)) => rows.push(row("IDA", format!("unavailable: {e}"))),
+    }
+    rows
+}
+
+pub const ABOUT_BLURB: &str =
+    "A modern front end for IDA Pro, built on zui. The IDA kernel runs headless through idalib.";
+
 pub struct AboutDialog {
     info: Option<Result<VersionInfo, SharedString>>,
     focus: FocusHandle,
@@ -25,26 +93,11 @@ impl AboutDialog {
     /// Asks the open database's host for its versions, or starts a throwaway
     /// host when nothing is open (the welcome screen has none).
     pub fn new(session: &Entity<Session>, cx: &mut Context<Self>) -> Self {
-        let running = session.read(cx).call(Version {});
-        let transient = if session.read(cx).client_is_none() {
-            Client::spawn(&HostConfig::discover())
-                .map(|(c, _logs)| c)
-                .map_err(|e| e.to_string())
-                .ok()
-        } else {
-            None
-        };
-        let fut = transient.as_ref().map(|c| c.call(Version {}));
+        let fut = fetch_version(session, cx);
         cx.spawn(async move |this, cx| {
-            let result = match fut {
-                Some(f) => f.await,
-                None => running.await,
-            };
-            if let Some(c) = transient {
-                c.kill();
-            }
+            let result = fut.await;
             this.update(cx, |d, cx| {
-                d.info = Some(result.map_err(|e| e.to_string().into()));
+                d.info = Some(result);
                 cx.notify();
             })
             .ok();
@@ -66,46 +119,28 @@ impl Focusable for AboutDialog {
 impl Render for AboutDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx);
-        let row = |label: &'static str, value: String| {
-            div()
-                .flex()
-                .gap(px(12.))
-                .child(
-                    div()
-                        .w(px(110.))
-                        .flex_none()
-                        .text_color(hsla(theme.muted))
-                        .child(label),
-                )
-                .child(div().flex_1().min_w_0().child(value))
-        };
-        let mut rows = vec![
-            row("ida-zui", env!("CARGO_PKG_VERSION").to_owned()),
-            row("Settings", settings::settings_path().display().to_string()),
-        ];
-        match &self.info {
-            None => rows.push(row("IDA", "asking the IDA host…".to_owned())),
-            Some(Ok(v)) => {
-                rows.push(row("IDA", v.ida_version.clone()));
-                rows.push(row("IDADIR", v.ida_dir.clone()));
-                rows.push(row("IDA user dir", v.user_dir.clone()));
-                rows.push(row("SDK", v.sdk_dir.clone()));
-                rows.push(row("Host", v.host_exe.clone()));
-            }
-            Some(Err(e)) => rows.push(row("IDA", format!("unavailable: {e}"))),
-        }
+        let rows = about_rows(&theme, self.info.as_ref());
         frame(&theme, 640.)
             .key_context("Modal")
             .track_focus(&self.focus)
             .on_action(cx.listener(|_, _: &Confirm, _, cx| cx.emit(DialogEvent::Close)))
             .on_action(cx.listener(|_, _: &Cancel, _, cx| cx.emit(DialogEvent::Close)))
-            .child(header(&theme, "ida-zui", cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Close))))
+            .child(header(
+                &theme,
+                "ida-zui",
+                cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Close)),
+            ))
             .child(
                 body()
-                    .child(caption(&theme, "A modern front end for IDA Pro, built on zui. The IDA kernel runs headless through idalib."))
+                    .child(caption(&theme, ABOUT_BLURB))
                     .child(div().flex().flex_col().gap(px(6.)).children(rows)),
             )
-            .child(footer(&theme).child(button("close", "Close", ButtonKind::Primary, &theme).on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Close)))))
+            .child(
+                footer(&theme).child(
+                    button("close", "Close", ButtonKind::Primary, &theme)
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Close))),
+                ),
+            )
     }
 }
 

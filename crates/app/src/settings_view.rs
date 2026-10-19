@@ -4,6 +4,7 @@ use crate::actions::{self, Cancel, Command, Confirm};
 use crate::dialog::{ButtonKind, DialogEvent, button, caption, checkbox, footer, frame, header};
 use crate::input::{InputEvent, TextInput};
 use crate::scrollbar::{self, Axes, Source};
+use crate::session::Session;
 use crate::settings;
 use crate::theme::{self, Theme, hsla};
 use crate::ui::{self, icon};
@@ -28,6 +29,7 @@ pub enum Section {
     Analysis,
     Debugger,
     Python,
+    About,
 }
 
 /// History sizes offered in Settings > Python.
@@ -52,6 +54,10 @@ pub struct SettingsView {
     recording: Option<&'static Command>,
     pending: Option<Pending>,
     interceptor: Option<Subscription>,
+    /// The About section: IDA's versions, asked of the host once it is shown.
+    session: Entity<Session>,
+    about: Option<Result<ida_proto::VersionInfo, SharedString>>,
+    about_asked: bool,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -59,7 +65,7 @@ pub struct SettingsView {
 impl EventEmitter<DialogEvent> for SettingsView {}
 
 impl SettingsView {
-    pub fn new(section: Section, cx: &mut Context<Self>) -> Self {
+    pub fn new(section: Section, session: Entity<Session>, cx: &mut Context<Self>) -> Self {
         let family = settings::get(cx).code_font.clone();
         let font = cx.new(|cx| TextInput::new(&family, "Font family", cx).tall().mono());
         let filter = cx.new(|cx| {
@@ -101,7 +107,7 @@ impl SettingsView {
             }),
             cx.subscribe(&filter, |_, _, _: &InputEvent, cx| cx.notify()),
         ];
-        Self {
+        let mut view = Self {
             section,
             font,
             filter,
@@ -111,14 +117,39 @@ impl SettingsView {
             recording: None,
             pending: None,
             interceptor: None,
+            session,
+            about: None,
+            about_asked: false,
             focus: cx.focus_handle(),
             _subs: subs,
+        };
+        view.ask_about(cx);
+        view
+    }
+
+    /// The About section needs IDA's versions: ask the host the first time
+    /// the section is shown.
+    fn ask_about(&mut self, cx: &mut Context<Self>) {
+        if self.section != Section::About || self.about_asked {
+            return;
         }
+        self.about_asked = true;
+        let fut = crate::help::fetch_version(&self.session, cx);
+        cx.spawn(async move |this, cx| {
+            let result = fut.await;
+            this.update(cx, |v, cx| {
+                v.about = Some(result);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn set_section(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
         self.stop_recording();
         self.section = section;
+        self.ask_about(cx);
         let focus = self.focus_handle(cx);
         window.focus(&focus, cx);
         cx.notify();
@@ -255,6 +286,7 @@ impl SettingsView {
                     input.update(cx, |i, cx| i.set_value("", cx));
                 }
             }
+            Section::About => {}
             Section::Listing => settings::update(cx, |s| {
                 s.listing_indent = settings::DEFAULT_INDENT;
                 s.listing_comment = settings::DEFAULT_COMMENT_COLUMN;
@@ -624,6 +656,28 @@ impl SettingsView {
                 ui::segmented_track(&t).children(policies).into_any_element(),
             ))
             .child(caption(&t, "Applied when a process starts. The Exceptions panel changes single codes for the open database."))
+    }
+
+    fn render_about(&self, theme: &Theme) -> gpui::Div {
+        let t = *theme;
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child("About ida-zui"),
+            )
+            .child(caption(&t, crate::help::ABOUT_BLURB))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .children(crate::help::about_rows(&t, self.about.as_ref())),
+            )
     }
 
     fn render_python(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
@@ -1011,7 +1065,8 @@ impl Focusable for SettingsView {
             | Section::Listing
             | Section::Analysis
             | Section::Debugger
-            | Section::Python => self.focus.clone(),
+            | Section::Python
+            | Section::About => self.focus.clone(),
         }
     }
 }
@@ -1080,6 +1135,7 @@ impl Render for SettingsView {
             Section::Analysis => self.render_analysis(&theme, cx),
             Section::Debugger => self.render_debugger(&theme, cx),
             Section::Python => self.render_python(&theme, cx),
+            Section::About => self.render_about(&theme),
         };
         let restore = "Restore defaults";
         frame(&theme, 920.)
@@ -1157,7 +1213,7 @@ impl Render for SettingsView {
                                 Some(Section::Python),
                                 cx,
                             ))
-                            .child(nav("nav-about", "About", "info", None, cx)),
+                            .child(nav("nav-about", "About", "info", Some(Section::About), cx)),
                     )
                     .child(
                         div()

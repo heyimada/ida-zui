@@ -707,6 +707,43 @@ fn type_editing(c: &Client, out: &mut String, check: &mut impl FnMut(bool, &str)
         "valid statements apply, the broken one is reported on its own lines",
     );
 
+    // Errors are attributed per declaration (GAPS E1): each declaration alone,
+    // each message inside its own declaration's lines.
+    let several = "struct E1a {
+  int a;
+};
+struct E1b {
+  int b
+};
+struct E1c {
+  nosuch2_t c;
+};";
+    let spans = declerr::split_declarations(several);
+    let mut lines_by_decl = Vec::new();
+    for span in &spans {
+        let r = c
+            .call_blocking(TypeApply {
+                decl: several[span.start..span.end].into(),
+            })
+            .unwrap();
+        lines_by_decl.push(
+            declerr::locate_in(several, span, &r.messages)
+                .into_iter()
+                .map(|e| e.line)
+                .collect::<Vec<_>>(),
+        );
+    }
+    writeln!(out, "per-declaration error lines: {lines_by_decl:?}").unwrap();
+    check(
+        spans.len() == 3
+            && lines_by_decl[0].is_empty()
+            && !lines_by_decl[1].is_empty()
+            && lines_by_decl[1].iter().all(|l| (3..=5).contains(l))
+            && !lines_by_decl[2].is_empty()
+            && lines_by_decl[2].iter().all(|l| (6..=8).contains(l)),
+        "type-parser errors are attributed to the line range of their own declaration",
+    );
+
     // Member editing.
     let add = c.call_blocking(UdtAdd {
         name: "E2eS".into(),
@@ -830,14 +867,87 @@ fn type_editing(c: &Client, out: &mut String, check: &mut impl FnMut(bool, &str)
         c.call_blocking(Redo {}).unwrap() && member_names(c, "E2eS").len() == n + 1,
         "redo restores it",
     );
-    let xr = c.call_blocking(UdtXrefs {
-        name: "E2eS".into(),
-        index: 0,
-    });
-    check(
-        xr.is_ok(),
-        "udt_xrefs answers (the sample has no struct-offset operands, so the list is empty)",
+    // Struct-member xrefs with a real struct offset (GAPS E3): apply
+    // `E3S.f6` (offset 0x18) to an operand `[reg+18h]` of the sample, let the
+    // analysis queue process it (IDA adds the member xref there, not inside
+    // `op_stroff`, which only links the struct), then ask for the member's xrefs.
+    let r = c
+        .call_blocking(TypeApply {
+            decl: "struct E3S { int p0; int p1; int p2; int p3; int p4; int p5; int f6; int f7; };"
+                .into(),
+        })
+        .unwrap();
+    check(r.applied, "the member-xrefs struct E3S is declared");
+    let found = py(
+        c,
+        "import idautils, ida_ua
+found = None
+for i, f in enumerate(idautils.Functions()):
+    if i > 80: break
+    for ea in idautils.FuncItems(f):
+        insn = ida_ua.insn_t()
+        if ida_ua.decode_insn(insn, ea) == 0: continue
+        for n in range(2):
+            if insn.ops[n].type == ida_ua.o_displ and insn.ops[n].addr == 0x18:
+                found = (ea, n); break
+        if found: break
+    if found: break
+print(found[0] if found else 0, found[1] if found else 0)",
+        0,
+        true,
     );
+    let (op_ea, op_n) = text_of(&found, "out")
+        .split_once(' ')
+        .map(|(a, b)| (a.trim().parse::<u64>().unwrap_or(0), b.trim().to_owned()))
+        .unwrap_or((0, "0".into()));
+    if op_ea == 0 {
+        writeln!(
+            out,
+            "no [reg+18h] operand in this sample: struct-offset xrefs not exercised"
+        )
+        .unwrap();
+    } else {
+        let applied = py(
+            c,
+            &format!(
+                "import idc, ida_typeinf
+tid = ida_typeinf.get_named_type_tid('E3S')
+print(idc.op_stroff({op_ea}, {op_n}, tid, 0))
+import ida_auto
+ida_auto.plan_ea({op_ea})
+ida_auto.auto_wait()"
+            ),
+            0,
+            true,
+        );
+        writeln!(
+            out,
+            "op_stroff on operand {op_n}: {}",
+            text_of(&applied, "out").trim()
+        )
+        .unwrap();
+        let xr = c
+            .call_blocking(UdtXrefs {
+                name: "E3S".into(),
+                index: 6,
+            })
+            .unwrap();
+        writeln!(out, "E3S.f6 xrefs: {}", xr.len()).unwrap();
+        check(
+            xr.iter().any(|x| x.from == op_ea),
+            "udt_xrefs lists the operand a struct offset was applied to",
+        );
+        let other = c
+            .call_blocking(UdtXrefs {
+                name: "E3S".into(),
+                index: 0,
+            })
+            .unwrap();
+        check(
+            other.iter().all(|x| x.from != op_ea),
+            "udt_xrefs of another member does not list it",
+        );
+    }
 
     // Creating, unions and dependents.
     check(
@@ -1338,6 +1448,17 @@ fn py(c: &Client, source: &str, ea: Ea, force: bool) -> PyReply {
     .unwrap()
 }
 
+/// The listing columns the kernel holds, as `indent,cmt_indent`.
+fn inf_columns(c: &Client) -> String {
+    let r = py(
+        c,
+        "import ida_ida; print(ida_ida.inf_get_indent(), ida_ida.inf_get_cmt_indent(), sep=',')",
+        0,
+        true,
+    );
+    text_of(&r, "out").trim().to_owned()
+}
+
 fn text_of(r: &PyReply, stream: &str) -> String {
     r.chunks
         .iter()
@@ -1433,6 +1554,28 @@ fn python_and_events(
     check(
         text_of(&r, "result") == "10\n",
         "names persist between evaluations",
+    );
+    let comp = c
+        .call_blocking(PyComplete {
+            word: "idaapi.get_func_q".into(),
+        })
+        .unwrap();
+    check(
+        comp.iter().any(|w| w == "idaapi.get_func_qty"),
+        "py_complete offers idaapi.get_func_qty for idaapi.get_func_q",
+    );
+    let comp = c.call_blocking(PyComplete { word: "x".into() }).unwrap();
+    check(
+        comp.iter().any(|w| w == "x"),
+        "py_complete sees names the console defined",
+    );
+    check(
+        c.call_blocking(PyComplete {
+            word: String::new(),
+        })
+        .unwrap()
+        .is_empty(),
+        "py_complete of nothing offers nothing",
     );
     let r = py(c, "for i in range(3):", target, false);
     check(
@@ -2430,6 +2573,7 @@ fn main() {
 
     // Listing options: the instruction column of the generated lines follows
     // set_listing_options; the original value is restored afterwards.
+    let original_columns: String;
     {
         let indent_of = |client: &Client| -> usize {
             let l = client
@@ -2449,6 +2593,7 @@ fn main() {
                 .map_or(usize::MAX, |t| t.len() - t.trim_start().len())
         };
         let before = indent_of(&client);
+        original_columns = inf_columns(&client);
         client
             .call_blocking(SetListingOptions {
                 indent: 4,
@@ -2505,7 +2650,27 @@ fn main() {
             name: "e2e_saved".into(),
         })
         .unwrap();
+    // The UI's listing columns must not reach the file (GAPS S4): save with
+    // them set, check they are still applied afterwards, and below that a
+    // fresh host finds the original values in the database.
+    client
+        .call_blocking(SetListingOptions {
+            indent: 4,
+            cmt_indent: 24,
+        })
+        .unwrap();
     client.call_blocking(Save {}).unwrap();
+    let applied = inf_columns(&client);
+    writeln!(
+        out,
+        "
+== listing columns and save: original {original_columns}, after save {applied}"
+    )
+    .unwrap();
+    check(
+        applied == "4,24",
+        "save re-applies the UI's listing columns to the open database",
+    );
     client.call_blocking(Close { save: true }).unwrap();
     drop(client);
     let logs = log_lines.join().unwrap();
@@ -2529,6 +2694,12 @@ fn main() {
             base: None,
         }) {
             Ok(_) => {
+                let stored = inf_columns(&c);
+                writeln!(out, "reopen via {label}: stored columns {stored}").unwrap();
+                check(
+                    stored == original_columns,
+                    &format!("listing columns in the saved database are IDA's own ({label})"),
+                );
                 let f = c.call_blocking(Functions {}).unwrap();
                 let kept = f.iter().any(|f| f.start == target && f.name == "e2e_saved");
                 writeln!(out, "reopen via {label}: rename kept = {kept}").unwrap();

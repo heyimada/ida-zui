@@ -285,6 +285,22 @@ impl Workspace {
             }
             SessionEvent::OpenDoc(key) if active => self.open_doc(key.clone(), window, cx),
             SessionEvent::DebugStopped => self.on_debug_stopped(ix, cx),
+            SessionEvent::Rebased { delta } => {
+                // Editor tabs that hold addresses follow the move.
+                for d in &mut self.dbs[ix].docs {
+                    match (&mut d.key, &d.view) {
+                        (DocKey::Frame(a), DocView::Frame(v)) => {
+                            *a = crate::debugger::shift(*a, *delta);
+                            v.update(cx, |v, cx| v.rebase(*delta, cx));
+                        }
+                        (DocKey::Proximity(a), DocView::Proximity(v)) => {
+                            *a = crate::debugger::shift(*a, *delta);
+                            v.update(cx, |v, cx| v.rebase(*delta, cx));
+                        }
+                        _ => {}
+                    }
+                }
+            }
             SessionEvent::Closed => {
                 self.clear_docs(ix, window, cx);
                 if active {
@@ -1131,7 +1147,10 @@ impl Workspace {
             return;
         }
         let Some(ix) = self.index_of(id) else { return };
-        if !self.dbs[ix].dirty(cx) {
+        let dirty = self.dbs[ix].dirty(cx);
+        let loading = matches!(self.dbs[ix].session.read(cx).phase, Phase::Loading { .. });
+        let analyzing = self.dbs[ix].session.read(cx).analyzing();
+        if !dirty && !analyzing {
             self.close_db(id, false, window, cx);
             return;
         }
@@ -1139,9 +1158,33 @@ impl Workspace {
         self.activate(ix, window, cx);
         self.busy = true;
         let file = self.dbs[ix].title(cx);
+        if loading || !dirty {
+            // Nothing of the user's yet: the database is still being built.
+            self.ask(
+                format!("Stop the analysis of {file} and close it?"),
+                "The analysis is still running. It stops between two steps, and the partly analysed database is discarded.",
+                &["Stop analysis and close", "Cancel"],
+                1,
+                1,
+                window,
+                cx,
+                move |w, choice, window, cx| {
+                    w.busy = false;
+                    if choice == 0 {
+                        w.close_db(id, false, window, cx);
+                    }
+                },
+            );
+            return;
+        }
+        let detail = if analyzing {
+            "Your edits are only in memory until the database is saved. The analysis that is still running is stopped first."
+        } else {
+            "Your renames, comments and types are only in memory until the database is saved."
+        };
         self.ask(
             format!("Save changes to {file}?"),
-            "Your renames, comments and types are only in memory until the database is saved.",
+            detail,
             &["Save", "Don't save", "Cancel"],
             0,
             2,
@@ -1201,11 +1244,39 @@ impl Workspace {
             .filter(|d| d.dirty(cx))
             .map(|d| d.title(cx))
             .collect();
-        if dirty.is_empty() {
+        let analyzing: Vec<String> = self
+            .dbs
+            .iter()
+            .filter(|d| d.session.read(cx).analyzing())
+            .map(|d| d.title(cx))
+            .collect();
+        if dirty.is_empty() && analyzing.is_empty() {
             self.close_all(false, window, cx);
             return false;
         }
         self.busy = true;
+        if dirty.is_empty() {
+            // Only analyses are running: there is nothing to save.
+            self.ask(
+                match analyzing.as_slice() {
+                    [one] => format!("Stop the analysis of {one} and close?"),
+                    many => format!("Stop {} analyses and close?", many.len()),
+                },
+                "The analysis is still running. It stops between two steps, and the partly analysed database is discarded.",
+                &["Stop analysis and close", "Cancel"],
+                1,
+                1,
+                window,
+                cx,
+                |w, choice, window, cx| {
+                    w.busy = false;
+                    if choice == 0 {
+                        w.close_all(false, window, cx);
+                    }
+                },
+            );
+            return false;
+        }
         let (title, detail) = match dirty.as_slice() {
             [one] => (
                 format!("Save changes to {one}?"),
@@ -1371,7 +1442,8 @@ impl Workspace {
     }
 
     fn open_settings(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
-        let dialog = cx.new(|cx| SettingsView::new(section, cx));
+        let session = self.session.clone();
+        let dialog = cx.new(|cx| SettingsView::new(section, session, cx));
         self.show_dialog(dialog, window, cx);
     }
 
@@ -1973,6 +2045,15 @@ impl Render for Workspace {
         self.apply_listing_options(cx);
         let phase_ready = ready;
         let loading = matches!(self.session.read(cx).phase, Phase::Loading { .. });
+        // The loading screen has nothing to focus, so keys (Ctrl+W, the
+        // palette) would miss the workspace's bindings.
+        if loading
+            && self.dialog.is_none()
+            && self.modal.is_none()
+            && !self.focus.contains_focused(window, cx)
+        {
+            window.focus(&self.focus, cx);
+        }
         let body = if phase_ready {
             self.render_main(&t, cx).into_any_element()
         } else if loading {

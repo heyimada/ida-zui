@@ -118,3 +118,66 @@ fn a_brace_after_a_semicolon_still_falls_back_to_the_first_one() {
     let decl = "struct A3 {\n  int a[-1];\n};";
     assert_eq!(lines(decl, "Syntax error near: }\n")[0].0, 2);
 }
+
+// Per-declaration attribution (E1). Failure modes: a `;` inside a struct body
+// or a comment splitting a declaration; a comment-only tail becoming a
+// declaration; an error without a token landing on the neighbour's line;
+// a last declaration with no semicolon; empty text.
+
+fn spans(decl: &str) -> Vec<(usize, String)> {
+    split_declarations(decl)
+        .into_iter()
+        .map(|s| (s.first_line, decl[s.start..s.end].to_owned()))
+        .collect()
+}
+
+#[test]
+fn semicolons_in_bodies_and_comments_do_not_split() {
+    let decl = "struct A { int a; int b; };\n// not; a split\ntypedef int T; /* x; y */";
+    let got = spans(decl);
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0], (0, "struct A { int a; int b; };".to_owned()));
+    assert_eq!(got[1].0, 1, "a leading comment belongs to its declaration");
+    assert!(got[1].1.ends_with("typedef int T;"));
+}
+
+#[test]
+fn a_last_declaration_without_semicolon_is_kept_and_a_comment_tail_is_not() {
+    assert_eq!(spans("int a;\nstruct B { int x; }").len(), 2);
+    assert_eq!(spans("int a;\n// done\n").len(), 1);
+    assert!(spans("  \n// only a comment\n").is_empty());
+    assert!(spans("").is_empty());
+}
+
+#[test]
+fn spans_start_on_the_line_of_their_first_token() {
+    let decl = "\n\nstruct A { int a; };\n\n\nstruct B {\n  bad b;\n};";
+    let got = split_declarations(decl);
+    assert_eq!(
+        got.iter().map(|s| s.first_line).collect::<Vec<_>>(),
+        vec![2, 5]
+    );
+}
+
+#[test]
+fn a_message_without_a_token_stays_inside_its_own_declaration() {
+    // `locate` alone puts the second error on the first one's line; scoped to
+    // the declaration it can only land on that declaration.
+    let decl = "struct Ok1 { int a; };\n\nstruct Bad {\n  int b\n};";
+    let span = &split_declarations(decl)[1];
+    let got = locate_in(
+        decl,
+        span,
+        "Syntax error near: }\nSomething without a token\n",
+    );
+    assert!(got.iter().all(|e| (2..=4).contains(&e.line)), "{got:?}");
+    assert_eq!(got[0].line, 4);
+}
+
+#[test]
+fn the_same_token_in_an_earlier_declaration_is_not_blamed() {
+    let decl = "typedef unknown_t X;\nstruct S { unknown_t q; };";
+    let span = &split_declarations(decl)[1];
+    let got = locate_in(decl, span, "Syntax error near: unknown_t\n");
+    assert_eq!(got[0].line, 1);
+}

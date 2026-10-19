@@ -34,7 +34,7 @@
 - **FLIRT signatures**, **Lumina** pull and (confirmed) push, and **plugins**: IDA's plugin loader entries are listed, can be run headless, and get keymap entries.
 - **Debugger** (Windows, user mode): start or attach, breakpoints (conditional, hardware), step into / over / out, run to cursor, registers (editable, changes highlighted), stack, memory, call stack, threads, modules, exceptions and the program's debug output, with markers in the listing, graph, pseudocode and hex view. Details below.
 - **Several databases per window**, one host process each, with analysis progress, safe close (Save / Don't save / Cancel) and recent files.
-- **Settings**: themes (Dark, Light, High contrast, IDA Classic), fonts, an editable keymap with conflict detection, and analysis and Python options.
+- **Settings**: themes (Dark, Light, High contrast, IDA Classic), fonts, an editable keymap with conflict detection, analysis, debugger and Python options, and an About section with the IDA and SDK versions and paths.
 
 ## Requirements
 
@@ -182,7 +182,7 @@ IDA's defaults are used where IDA has one.
 | In the type editor: `Ctrl+S` / `Ctrl+Enter` | Apply the declaration |
 | `` Ctrl+` `` | Output panel (IDA's messages) |
 | `Alt+F7` | Run a Python script file |
-| In the Python console: `Enter` / `Shift+Enter` / `Ctrl+Enter` / `Up`, `Down` | Run if complete / new line / run anyway / history |
+| In the Python console: `Enter` / `Shift+Enter` / `Ctrl+Enter` / `Up`, `Down` / `Tab` | Run if complete / new line / run anyway / history / complete the name before the caret (again to cycle) |
 | `Ctrl+Alt+J` / `Ctrl+Alt+I` | Show or hide the bottom panel / the inspector |
 | `F9` / `F12` / `Ctrl+F2` | Debugger: start or continue / pause / terminate |
 | `F7` / `F8` / `Ctrl+F7` / `F4` | Debugger: step into / step over / run until return / run to cursor |
@@ -193,8 +193,8 @@ IDA's defaults are used where IDA has one.
 ## Testing
 
 - **Unit tests** (`cargo test --workspace`) cover pure logic: the colour-tag parser, the graph layout invariants, the declaration-error mapper, the editor's text model and scrollbar geometry.
-- **Protocol E2E** (`.\scripts\e2e.ps1 [-Sample <exe>]`) builds everything, opens a fresh copy of the sample (default `C:\Windows\System32\find.exe`) through `ida-host.exe` and exercises every request plus edit, undo/redo, save and reopen. It writes a deterministic dump to `artifacts/e2e/<name>.txt` and IDA's log next to it, and exits non-zero if any check fails. It needs your IDA and SDK.
-- **UI automation** (`.\scripts\ui-capture.ps1 -Goto <expr> -Steps "wait:15000","shot:x","key:tab","action:ida::OpenSettings",...`) drives the real app through its in-app automation channel (`IDA_ZUI_AUTOMATION`): no OS input is synthesised and only the app window is captured, so it never touches your other windows or clipboard. Steps: `key:`, `type:`, `action:`, `click:x,y`, `confirm:n`, `marker:`, `shot:`, `close`, `waitexit:ms`, `files:glob`; switches `-NoFile`, `-Reuse`, `-Settings '<json>'`, `-Release`, `-Log name`. Screenshots go to `artifacts/ui/*.png`. The screenshots in this README were made this way on `find.exe`.
+- **Protocol E2E** (`.\scripts\e2e.ps1 [-Sample <exe>]`) builds everything, opens a fresh copy of the sample (default `C:\Windows\System32\find.exe`) through `ida-host.exe` and exercises every request plus edit, undo/redo, save and reopen, then stops an analysis in progress on a copy of `shell32.dll` (`stop_e2e`: the stop is answered at once, the host closes and leaves no database files) and runs the debugger E2E. It writes a deterministic dump to `artifacts/e2e/<name>.txt` and IDA's log next to it, and exits non-zero if any check fails. It needs your IDA and SDK.
+- **UI automation** (`.\scripts\ui-capture.ps1 -Goto <expr> -Steps "wait:15000","shot:x","key:tab","action:ida::OpenSettings",...`) drives the real app through its in-app automation channel (`IDA_ZUI_AUTOMATION`): no OS input is synthesised and only the app window is captured, so it never touches your other windows or clipboard. Steps: `key:`, `type:`, `action:`, `click:x,y`, `confirm:n`, `drop:path`, `marker:`, `shot:`, `close`, `waitexit:ms`, `files:glob`, `procs` and `hostsgone` (fails the script if a host outlives its tab); switches `-NoFile`, `-Reuse`, `-Settings '<json>'`, `-Release`, `-Log name`. Screenshots go to `artifacts/ui/*.png`. The screenshots in this README were made this way on `find.exe`.
 
 Tests never push to Lumina: the host refuses a push whenever `IDA_ZUI_AUTOMATION` or `IZS_BLOCK_LUMINA_PUSH` is set.
 
@@ -223,45 +223,40 @@ Tests never push to Lumina: the host refuses a push whenever `IDA_ZUI_AUTOMATION
 - Closing is safe: every way of closing the window (Alt+F4, the title-bar X,
   Ctrl+Q) asks Save / Don't save / Cancel when there are unsaved changes, then
   closes the database through the host, which packs it into the `.i64`. A
-  database that was freshly analyzed counts as unsaved. Closing one database tab asks the same question for that database only. A host that does not
-  answer within 15 s is killed.
+  database that was freshly analyzed counts as unsaved. Closing one database tab asks the same question for that database only. Closing a tab or the window while an analysis is running asks "Stop analysis and close" or "Cancel"; the host stops between two analysis steps (`analysis_stop`) and closes without leaving database files behind. A host that does not
+  answer within 15 s is killed as a last resort. The listing columns ida-zui sets are not written into the `.i64`.
 - Large databases work: `shell32.dll` (34k functions, 55k names) opens and pages
   through the listing in both directions; the 32-bit `find.exe` works too.
 
 **Partial**
-- **Type editors:** parser errors are mapped to lines by searching for the
-  token IDA names, since `parse_decls` reports no line numbers. Struct-member
-  xrefs are implemented but only an empty result was exercised (the sample has
-  no struct-offset operands). IME input in the code editor is untested.
+- **Type editors:** `parse_decls` reports no line numbers. When a text with several declarations fails, each declaration is parsed alone and its messages are placed inside its own lines; within one declaration the error is still found by the token IDA names. Struct-member xrefs are covered by the protocol E2E with a struct offset applied to a real operand (IDA adds the member xref when the analysis queue processes it). IME input in the code editor is untested.
 - **Text search** uses IDA's `find_text`, so it can be slow on large databases.
 - **Refresh after edits:** edits made in this UI refresh through their own request; changes made by scripts refresh through `db_changed` events once the script returns (not while it runs, since the host is busy). Plugins that change the database outside a request would be reported with origin `request` and are not refreshed.
-- **Python console:** no completion or inline help; IDC is not exposed; Cancel needs the script to be running Python bytecode (see above); output is delivered when a command returns, not streamed (the Output tab streams it).
-- **Several databases:** the listing columns are stored in the .i64 when saved. Tab switching and chip clicks were driven through the automation channel, which bypasses the OS hit test, so a real mouse click on a chip (outside the drag area) is untested. Closing a tab whose analysis is still running waits up to 15 s for the host before killing it.
+- **Python console:** Tab completes dotted names through Python's `rlcompleter` (no inline help); IDC is not exposed; Cancel needs the script to be running Python bytecode (see above). Output streams into the console while a script runs, as plain lines (IDA's own messages included); when the script returns they are replaced by the same output split by stream (stdout, stderr, values, tracebacks).
+- **Several databases:** tab switching and chip clicks were driven through the automation channel, which bypasses the OS hit test, so a real mouse click on a chip (outside the drag area) is untested. Opening a file never replaces an open database (it gets a tab of its own), so there is no open-over-unsaved prompt; a drop is simulated through gpui's file-drop events.
 - **Analysis percentage** is an estimate (stage bands calibrated on shell32.dll), not IDA's own measure.
 - **Graph edges** are routed around blocks: a long edge gets a waypoint in every layer it crosses and runs in the gaps between layers, loops use lanes right of the graph. Two edges may still share a short stretch of line where waypoints of different layers coincide, and the crossing count is only reduced (barycentre ordering), not minimised.
 - **Lumina:** pull and push are wired to the kernel's own actions and read their outcome from IDA's log. Only the error path (an unreachable server) has been exercised; a successful pull against a live server has not been verified. Push is never executed by any test (see above).
-- **Proximity:** clicking the + / - buttons and double-click navigation are implemented and E2E-covered only through the host method; the clicks themselves were not driven in the UI. Data nodes (the Data toggle) are implemented but only default off was checked.
+- **Proximity:** the + buttons (callers and callees), the Data toggle and double-click navigation were driven by automation clicks. After expanding a node the new nodes can lie outside the view (no automatic re-fit), and with Data on the extra data references show as larger counts but were not seen as separate data nodes.
 - **Signatures:** applying runs the whole analysis queue again, as IDA does; the window lists `.sig` files of the processor's `sig` directories in `IDADIR` and `IDAUSR` and reads their title and function count from the file header. Un-applying a signature is not offered (IDA cannot remove one from a database either).
 
 **Restyle gaps**
 - Scrollbars cover every scrollable surface except the single-line Python input and menu bar dropdowns that fit. The editor's scrollbar path (`editor_source`) was checked only through the same code as the other surfaces: no screenshot of an editor with overflowing text was taken. The listing's thumb reflects the loaded buffer, not the whole address space.
-- Graph edges: loops and long edges into one block share one trunk and one arrival port. Edges sharing only a source are not bundled. The graph view still stops zooming out at 15% (L7).
+- Graph edges: loops and long edges into one block share one trunk and one arrival port. Edges sharing only a source are not bundled. The graph zooms out to 3% (blocks are plain boxes below 30%) so a large function fits.
 - The graph does not fold "N earlier instructions", and the focus ring is a 2 px spread without the 1 px offset.
 - Recent files show size and age but not the architecture badge.
-- Settings: the About section is listed but disabled.
 - The split is off by default (the design's main window shows it on).
 - High contrast and IDA Classic extend the token set but have no mockup to compare against.
 
 **Debugger gaps**
-- Windows user mode only (the `win32` module); no remote, Linux or kernel debugging, no source-level debugging, no tracing, no appcall.
 - The listing and hex view show the database's bytes, not the process memory (the Memory panel reads the process; breakpoint bytes read as the originals). The database is not synchronised with the process, so self-modifying or unpacked code shows as analysed.
 - First or last chance of an exception is not reported by IDA's API; it is inferred (the same exception at the same address right after a continue is the last chance).
-- Hit counts are the UI session's own count of stops; threads show no per-thread instruction pointer; xmm/ymm registers are fetched but not shown; the pseudocode marks follow the nearest statement address, not an exact instruction.
+- Hit counts are the UI session's own count of stops; threads show no per-thread instruction pointer; xmm/ymm registers are fetched but not shown; the pseudocode marks follow the nearest statement address, not an exact instruction (see D4 to D8 in docs/GAPS.md).
 - Pausing uses a request that a target may never honour; the UI then offers to terminate (`pause_timeout`).
 - Attach and detach were tested against a process we start ourselves.
 
-**Not implemented**
-- Source-level and remote debugging
+**Non-goals for now**
+- Debugging is Windows user mode only: no remote, Linux or kernel debugging, no source-level debugging, no tracing, no appcall.
 
 The full list of known gaps, with priorities and suggested fixes, is in [docs/GAPS.md](docs/GAPS.md). The roadmap is [docs/PLAN.md](docs/PLAN.md), and technical notes on idalib are in [docs/IDALIB_FINDINGS.md](docs/IDALIB_FINDINGS.md).
 

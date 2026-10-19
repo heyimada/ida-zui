@@ -178,9 +178,16 @@ methods! {
     PyEval = "py_eval" { source: String, ea: Ea, force: bool } -> PyReply;
     /// Runs a Python script file (File > Script file).
     PyRunFile = "py_run_file" { path: String, ea: Ea } -> PyReply;
+    /// Completions of the dotted name `word` in the console's namespace, from
+    /// Python's `rlcompleter` (sorted, at most 200).
+    PyComplete = "py_complete" { word: String } -> Vec<String>;
     /// Raises KeyboardInterrupt in the running script. Answered at once, even
     /// while another request is executing.
     Interrupt = "interrupt" {} -> ();
+    /// Asks the running auto-analysis to stop between two steps (the remaining
+    /// queue is dropped and `open` / the request in progress returns).
+    /// Answered at once, like `interrupt`.
+    AnalysisStop = "analysis_stop" {} -> ();
 
     /// FLIRT: the planned and applied signatures, the `.sig` files available
     /// for the processor, and how many library functions the database has.

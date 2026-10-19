@@ -11,11 +11,14 @@ use crate::table;
 use crate::theme::{Theme, code_font_name, code_font_size, code_line_height, hsla};
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, ScrollStrategy, SharedString,
-    Subscription, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    Subscription, UniformListScrollHandle, Window, canvas, deferred, div, prelude::*, px,
+    uniform_list,
 };
+use ida_proto::declerr::{DeclError, locate_in, split_declarations};
 use ida_proto::{
     ApplyReply, ClientError, TypeApply, TypeBrief, TypeCreate, TypeDecl, TypeDelete, TypeList,
 };
+use std::cell::Cell;
 use std::rc::Rc;
 use zui_editor::{CHighlighter, Editor, EditorEvent, ErrorMarker, Pos};
 
@@ -28,7 +31,15 @@ enum Armed {
     Delete(String),
 }
 
+/// Toolbar width (logical px) below which the secondary buttons fold into a menu.
+const NARROW_TOOLBAR: f32 = 780.;
+
 pub struct TypesView {
+    /// Width of the toolbar as last painted, to decide when it needs the
+    /// overflow menu.
+    bar_w: Rc<Cell<f32>>,
+    narrow: bool,
+    overflow: bool,
     session: Entity<Session>,
     filter: Entity<TextInput>,
     all: Rc<Vec<TypeBrief>>,
@@ -112,6 +123,9 @@ impl TypesView {
             style: (theme.name, code_font_name(), code_font_size().to_bits()),
             scroll: UniformListScrollHandle::new(),
             loading: false,
+            bar_w: Rc::new(Cell::new(0.)),
+            narrow: false,
+            overflow: false,
             _subs: subs,
         };
         me.reload(true, cx);
@@ -263,6 +277,100 @@ impl TypesView {
         cx.emit(DocEvent::Open(key));
     }
 
+    /// The "more" button and its menu: New type, Import, Open editor, Delete.
+    fn overflow_menu(
+        &self,
+        editable: bool,
+        idx: Option<usize>,
+        has_type: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let t = *theme;
+        let item = |id: &'static str, label: &'static str, enabled: bool| {
+            div()
+                .id(id)
+                .h(px(28.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .rounded(px(4.))
+                .text_size(px(12.))
+                .text_color(hsla(if enabled { t.text } else { t.faint }))
+                .when(enabled, |d| {
+                    d.cursor_pointer().hover(|d| d.bg(hsla(t.hover)))
+                })
+                .child(label)
+        };
+        let open = self.overflow;
+        let menu =
+            open.then(|| {
+                deferred(
+                    div().absolute().top(px(32.)).right(px(0.)).child(
+                        div()
+                            .occlude()
+                            .min_w(px(160.))
+                            .p(px(4.))
+                            .rounded(px(8.))
+                            .bg(hsla(t.popover))
+                            .border_1()
+                            .border_color(hsla(t.border_strong))
+                            .shadow(crate::ui::drop_shadow(&t, 8., 24.))
+                            .on_mouse_down_out(cx.listener(|v, _, _, cx| {
+                                v.overflow = false;
+                                cx.notify();
+                            }))
+                            .child(item("ov-new", "New type…", true).on_click(cx.listener(
+                                |v, _, _, cx| {
+                                    v.overflow = false;
+                                    v.new_type(cx);
+                                },
+                            )))
+                            .child(item("ov-import", "Import C header…", true).on_click(
+                                cx.listener(|v, _, window, cx| {
+                                    v.overflow = false;
+                                    v.import(window, cx);
+                                }),
+                            ))
+                            .child(
+                                item("ov-open", "Open editor", editable).on_click(cx.listener(
+                                    move |v, _, _, cx| {
+                                        v.overflow = false;
+                                        if let (true, Some(ix)) = (editable, idx) {
+                                            v.open_editor(ix, cx);
+                                        }
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(item("ov-delete", "Delete", has_type).on_click(cx.listener(
+                                move |v, _, _, cx| {
+                                    v.overflow = false;
+                                    if has_type {
+                                        v.delete(cx);
+                                    }
+                                    cx.notify();
+                                },
+                            ))),
+                    ),
+                )
+            });
+        div()
+            .relative()
+            .child(
+                crate::ui::icon_button("types-more", "chevron-down", 24., open, true, &t)
+                    .tooltip(crate::ui::tip(
+                        "More: New type, Import, Open editor, Delete",
+                        None,
+                    ))
+                    .on_click(cx.listener(|v, _, _, cx| {
+                        v.overflow = !v.overflow;
+                        cx.notify();
+                    })),
+            )
+            .children(menu)
+    }
+
     fn apply(&mut self, cx: &mut Context<Self>) {
         let decl = self.editor.read(cx).text();
         if decl.trim().is_empty() {
@@ -273,8 +381,31 @@ impl TypesView {
         let fut = self.session.read(cx).call(TypeApply { decl: decl.clone() });
         cx.spawn(async move |this, cx| {
             let result = fut.await;
+            let result = match result {
+                // IDA's parser gives no line numbers. When something failed in
+                // a text of several declarations, give it each declaration
+                // alone (the good ones are idempotent) and attribute every
+                // message to the declaration that printed it.
+                Ok(reply) if reply.errors > 0 && split_declarations(&decl).len() > 1 => {
+                    let mut errors = Vec::new();
+                    for span in split_declarations(&decl) {
+                        let slice = decl[span.start..span.end].to_owned();
+                        let Ok(call) = this.update(cx, |v, cx| {
+                            v.session.read(cx).call(TypeApply { decl: slice })
+                        }) else {
+                            return;
+                        };
+                        if let Ok(one) = call.await {
+                            errors.extend(locate_in(&decl, &span, &one.messages));
+                        }
+                    }
+                    Ok((reply, Some(errors)))
+                }
+                Ok(reply) => Ok((reply, None)),
+                Err(e) => Err(e),
+            };
             this.update(cx, |v, cx| match result {
-                Ok(reply) => v.applied(decl, reply, cx),
+                Ok((reply, errors)) => v.applied(decl, reply, errors, cx),
                 Err(e) => v.fail(e, cx),
             })
             .ok();
@@ -282,8 +413,14 @@ impl TypesView {
         .detach();
     }
 
-    fn applied(&mut self, decl: String, reply: ApplyReply, cx: &mut Context<Self>) {
-        let errors = reply.errors(&decl);
+    fn applied(
+        &mut self,
+        decl: String,
+        reply: ApplyReply,
+        by_declaration: Option<Vec<DeclError>>,
+        cx: &mut Context<Self>,
+    ) {
+        let errors = by_declaration.unwrap_or_else(|| reply.errors(&decl));
         self.messages = errors
             .iter()
             .map(|e| (Some(e.line), e.message.clone().into()))
@@ -698,6 +835,7 @@ impl Render for TypesView {
         let editable = brief
             .as_ref()
             .is_some_and(|t| matches!(t.kind.as_str(), "struct" | "union" | "enum"));
+        let narrow = self.narrow;
         let idx = brief
             .as_ref()
             .and_then(|b| self.shown.iter().position(|&i| self.all[i].name == b.name));
@@ -720,6 +858,7 @@ impl Render for TypesView {
                         div()
                             .h(px(40.))
                             .flex_none()
+                            .relative()
                             .flex()
                             .items_center()
                             .gap(px(8.))
@@ -760,28 +899,62 @@ impl Render for TypesView {
                                 table::primary_button("apply", "Apply  Ctrl+S", &theme)
                                     .on_click(cx.listener(|v, _, _, cx| v.apply(cx))),
                             )
-                            .child(
-                                table::button("new", "New type…", &theme)
-                                    .on_click(cx.listener(|v, _, _, cx| v.new_type(cx))),
-                            )
-                            .child(
-                                table::button("import", "Import C header…", &theme)
-                                    .on_click(cx.listener(|v, _, window, cx| v.import(window, cx))),
-                            )
-                            .when(editable, |d| {
-                                d.child(table::button("open", "Open editor", &theme).on_click(
-                                    cx.listener(move |v, _, _, cx| {
-                                        if let Some(ix) = idx {
-                                            v.open_editor(ix, cx);
-                                        }
-                                    }),
+                            .when(!narrow, |d| {
+                                d.child(
+                                    table::button("new", "New type…", &theme)
+                                        .on_click(cx.listener(|v, _, _, cx| v.new_type(cx))),
+                                )
+                                .child(
+                                    table::button("import", "Import C header…", &theme).on_click(
+                                        cx.listener(|v, _, window, cx| v.import(window, cx)),
+                                    ),
+                                )
+                                .when(editable, |d| {
+                                    d.child(table::button("open", "Open editor", &theme).on_click(
+                                        cx.listener(move |v, _, _, cx| {
+                                            if let Some(ix) = idx {
+                                                v.open_editor(ix, cx);
+                                            }
+                                        }),
+                                    ))
+                                })
+                                .when(current.is_some(), |d| {
+                                    d.child(
+                                        table::button("delete", "Delete", &theme)
+                                            .on_click(cx.listener(|v, _, _, cx| v.delete(cx))),
+                                    )
+                                })
+                            })
+                            .when(narrow, |d| {
+                                d.child(self.overflow_menu(
+                                    editable,
+                                    idx,
+                                    current.is_some(),
+                                    &theme,
+                                    cx,
                                 ))
                             })
-                            .when(current.is_some(), |d| {
-                                d.child(
-                                    table::button("delete", "Delete", &theme)
-                                        .on_click(cx.listener(|v, _, _, cx| v.delete(cx))),
+                            // Measures the toolbar so it can fold into the overflow menu.
+                            .child({
+                                let width = self.bar_w.clone();
+                                let view = cx.entity();
+                                canvas(
+                                    move |bounds, _, cx| {
+                                        let w = f32::from(bounds.size.width);
+                                        width.set(w);
+                                        let want = w > 0. && w < NARROW_TOOLBAR;
+                                        view.update(cx, |v, cx| {
+                                            if v.narrow != want {
+                                                v.narrow = want;
+                                                v.overflow = false;
+                                                cx.notify();
+                                            }
+                                        });
+                                    },
+                                    |_, _, _, _| {},
                                 )
+                                .absolute()
+                                .size_full()
                             }),
                     )
                     .child(
