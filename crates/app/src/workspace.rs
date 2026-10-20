@@ -280,6 +280,17 @@ impl Workspace {
         let Some(ix) = self.index_of(id) else { return };
         let active = ix == self.active;
         match ev {
+            SessionEvent::EditComment(req) if active => {
+                let (session, ea, rep, text) = (
+                    self.dbs[ix].session.clone(),
+                    req.ea,
+                    req.repeatable,
+                    req.text.clone(),
+                );
+                let dialog = cx
+                    .new(|cx| crate::edit_dialogs::CommentDialog::new(session, ea, rep, &text, cx));
+                self.show_dialog(dialog, window, cx);
+            }
             SessionEvent::ContextMenu(req) if active => {
                 let (pos, title, entries, keyboard) = (
                     req.pos,
@@ -436,6 +447,7 @@ impl Workspace {
             inspector: self.show_inspector,
             bottom: self.show_bottom,
             split: self.split,
+            hide_casts: self.pseudo.read(cx).hide_casts(),
             debug_active: dbg.active(),
             debug_suspended: dbg.suspended(),
         }
@@ -1679,6 +1691,16 @@ impl Workspace {
                 self.close_modal(window, cx);
                 self.open_doc(key, window, cx);
             }
+            ModalEvent::Pick(ChoiceValue::Mark(ea, _)) => {
+                let ea = *ea;
+                self.close_modal(window, cx);
+                self.session.update(cx, |s, cx| s.navigate(ea, cx));
+            }
+            ModalEvent::Delete(ChoiceValue::Mark(_, slot)) => {
+                let slot = *slot;
+                self.delete_mark(slot, window, cx);
+            }
+            ModalEvent::Delete(_) => {}
             ModalEvent::Pick(ChoiceValue::Run(f)) => {
                 let f = f.clone();
                 self.close_modal(window, cx);
@@ -2722,6 +2744,9 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|w, _: &SwitchDatabase9, window, cx| w.activate_nth(8, window, cx)),
             )
+            .on_action(cx.listener(|w, _: &ToggleHideCasts, _, cx| {
+                w.pseudo.update(cx, |p, cx| p.toggle_hide_casts(cx))
+            }))
             .on_action(cx.listener(|w, _: &ToggleMinimap, _, cx| {
                 w.graph.update(cx, |g, cx| g.toggle_minimap(cx))
             }))
@@ -2758,6 +2783,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &NextFunction, _, cx| w.step_function(true, cx)))
             .on_action(cx.listener(|w, _: &PrevFunction, _, cx| w.step_function(false, cx)))
             .on_action(cx.listener(|w, _: &ResetLayout, window, cx| w.reset_layout(window, cx)))
+            .on_action(cx.listener(|w, _: &MarkPosition, _, cx| w.mark_position(cx)))
+            .on_action(cx.listener(|w, _: &JumpToMark, window, cx| w.jump_to_mark(window, cx)))
             .on_action(cx.listener(|w, _: &OpHexDec, _, cx| w.operand_hex_or_decimal(cx)))
             .on_action(cx.listener(|w, _: &OpHex, _, cx| w.set_operand(ida_proto::OpRepr::Hex, cx)))
             .on_action(

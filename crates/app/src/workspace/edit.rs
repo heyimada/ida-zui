@@ -11,7 +11,10 @@ use crate::jumps::parse_immediate;
 use crate::modal::{Choice, ChoiceValue};
 use crate::operands::hex_or_decimal;
 use gpui::{AppContext, Context, SharedString, Window};
-use ida_proto::{Ea, OpRepr, PatchList, RevertPatches, SetOpRepr, StringKind, TypeList};
+use ida_proto::{
+    Ea, MarkDelete, MarkList, MarkSet, OpRepr, PatchList, RevertPatches, SetOpRepr, StringKind,
+    TypeList,
+};
 use std::rc::Rc;
 
 /// The string types of Alt+A, with IDA's names.
@@ -31,6 +34,95 @@ const STRING_KINDS: [(StringKind, &str); 12] = [
 ];
 
 impl Workspace {
+    /// Alt+M: marks the caret position with a description.
+    pub(super) fn mark_position(&mut self, cx: &mut Context<Self>) {
+        let (ea, _) = self.edit_target(cx);
+        let session = self.session.clone();
+        let existing = session
+            .read(cx)
+            .marks
+            .iter()
+            .find(|m| m.ea == ea)
+            .map(|m| m.desc.clone())
+            .unwrap_or_default();
+        let s2 = session.clone();
+        session.update(cx, |s, cx| {
+            s.prompt(
+                format!("Mark position {ea:X}: description"),
+                existing,
+                move |desc, cx| {
+                    let fut = s2.read(cx).call(MarkSet { ea, desc });
+                    let s3 = s2.clone();
+                    cx.spawn(async move |cx| {
+                        let result = fut.await;
+                        s3.update(cx, |s, cx| match result {
+                            Ok(_) => {
+                                s.reload_marks(cx);
+                                s.info_msg(format!("Marked {ea:X}"), cx);
+                            }
+                            Err(e) => s.error(e.to_string(), cx),
+                        });
+                    })
+                    .detach();
+                },
+                cx,
+            )
+        });
+    }
+
+    /// Ctrl+M: a chooser over the marked positions; Enter jumps, Del removes.
+    pub(super) fn jump_to_mark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let fut = self.session.read(cx).call(MarkList {});
+        let fut = Box::pin(async move {
+            fut.await.map_err(|e| e.to_string()).map(|rows| {
+                rows.into_iter()
+                    .map(|m| Choice {
+                        label: if m.desc.is_empty() {
+                            format!("{:X}", m.ea).into()
+                        } else {
+                            m.desc.into()
+                        },
+                        detail: format!("{:X}", m.ea).into(),
+                        kind: "mark".into(),
+                        group: SharedString::default(),
+                        keywords: SharedString::default(),
+                        value: ChoiceValue::Mark(m.ea, m.slot),
+                    })
+                    .collect()
+            })
+        });
+        self.pick_ea(
+            "Marked positions",
+            "No marked positions yet: Alt+M marks the caret",
+            false,
+            fut,
+            window,
+            cx,
+        );
+    }
+
+    /// Del in the marks chooser: removes the mark and shows the rest.
+    pub(super) fn delete_mark(&mut self, slot: u32, window: &mut Window, cx: &mut Context<Self>) {
+        let fut = self.session.read(cx).call(MarkDelete { slot });
+        let session = self.session.clone();
+        let handle = window.window_handle();
+        self.close_modal(window, cx);
+        cx.spawn(async move |this, cx| {
+            let result = fut.await;
+            session.update(cx, |s, cx| match &result {
+                Ok(()) => s.reload_marks(cx),
+                Err(e) => s.error(e.to_string(), cx),
+            });
+            if result.is_ok() {
+                cx.update_window(handle, |_, window, cx| {
+                    this.update(cx, |w, cx| w.jump_to_mark(window, cx)).ok();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     /// The item the editing commands act on (its head, as in IDA, even when
     /// the caret came from a jump into the middle of it), and the operand under
     /// the caret.

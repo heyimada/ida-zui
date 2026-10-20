@@ -38,6 +38,19 @@ impl Anchor {
     }
 }
 
+/// Drag-select past the edge of a view: -1 above the top, 1 below the
+/// bottom, 0 inside (or beside it). The view then scrolls that way by a line
+/// per tick while the button stays down.
+pub fn edge_direction(y: f32, top: f32, bottom: f32) -> isize {
+    if y < top {
+        -1
+    } else if y > bottom {
+        1
+    } else {
+        0
+    }
+}
+
 /// One line as Copy sees it: its address text (the listing's gutter) and its text.
 pub struct CopyLine<'a> {
     pub addr: Option<&'a str>,
@@ -125,6 +138,18 @@ mod tests {
         let mut none = Anchor::default();
         none.shift(5);
         assert_eq!(none.range(1), None);
+    }
+
+    #[test]
+    fn dragging_past_an_edge_scrolls_toward_it() {
+        assert_eq!(edge_direction(5., 10., 100.), -1);
+        assert_eq!(edge_direction(150., 10., 100.), 1);
+        assert_eq!(
+            edge_direction(10., 10., 100.),
+            0,
+            "the edge itself is inside"
+        );
+        assert_eq!(edge_direction(100., 10., 100.), 0);
     }
 
     #[test]

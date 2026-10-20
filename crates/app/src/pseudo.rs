@@ -13,7 +13,7 @@ use gpui::{
     ScrollWheelEvent, SharedString, Subscription, Window, canvas, div, point, prelude::*, px,
 };
 use ida_proto::tags::{self, Line};
-use ida_proto::{Decompile, Ea, ItemInfo, PseudoItem, RenameLvar, SetLvarType};
+use ida_proto::{DecompileOpts, Ea, ItemInfo, PseudoItemOpts, RenameLvar, SetLvarType};
 
 pub struct PseudoView {
     session: Entity<Session>,
@@ -43,6 +43,12 @@ pub struct PseudoView {
     sel: Anchor,
     /// The line a mouse drag started on while the button is held.
     drag_from: Option<usize>,
+    /// Hex-Rays' `\` : the tree is shown without casts. Clicks are resolved
+    /// in the same tree.
+    hide_casts: bool,
+    /// Drag-select past an edge: which way, and whether the ticker runs.
+    auto_dir: isize,
+    auto_running: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -90,8 +96,24 @@ impl PseudoView {
             wanted: None,
             sel: Anchor::default(),
             drag_from: None,
+            hide_casts: false,
+            auto_dir: 0,
+            auto_running: false,
             _subs: vec![sub],
         }
+    }
+
+    pub fn hide_casts(&self) -> bool {
+        self.hide_casts
+    }
+
+    /// `\`: shows or hides the casts of the current function again.
+    pub fn toggle_hide_casts(&mut self, cx: &mut Context<Self>) {
+        self.hide_casts = !self.hide_casts;
+        if let Some(f) = self.func {
+            self.load(f, true, cx);
+        }
+        cx.notify();
     }
 
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
@@ -126,7 +148,10 @@ impl PseudoView {
         self.generation += 1;
         let generation = self.generation;
         self.loading = true;
-        let fut = self.session.read(cx).call(Decompile { ea: func });
+        let fut = self.session.read(cx).call(DecompileOpts {
+            ea: func,
+            hide_casts: self.hide_casts,
+        });
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = fut.await;
@@ -177,10 +202,11 @@ impl PseudoView {
             then(self, func, ItemInfo::default(), cx);
             return;
         };
-        let fut = self
-            .session
-            .read(cx)
-            .call(PseudoItem { func, item: anchor });
+        let fut = self.session.read(cx).call(PseudoItemOpts {
+            func,
+            item: anchor,
+            hide_casts: self.hide_casts,
+        });
         cx.spawn(async move |this, cx| {
             let info = fut.await.unwrap_or_default();
             this.update(cx, |v, cx| then(v, func, info, cx)).ok();
@@ -419,6 +445,17 @@ impl PseudoView {
             self.drag_from = None;
             return;
         }
+        if let Some(b) = self.hit.bounds {
+            self.auto_dir = crate::selection::edge_direction(
+                f32::from(ev.position.y),
+                f32::from(b.top()),
+                f32::from(b.bottom()),
+            );
+            if self.auto_dir != 0 {
+                self.start_autoscroll(cx);
+                return;
+            }
+        }
         let Some((row, col)) = self.hit.hit(ev.position) else {
             return;
         };
@@ -429,6 +466,42 @@ impl PseudoView {
             self.sync_cursor(cx);
             cx.notify();
         }
+    }
+
+    fn auto_tick(&mut self, cx: &mut Context<Self>) {
+        if let Some(from) = self.drag_from {
+            self.sel.begin(from);
+            self.step(self.auto_dir, cx);
+        }
+    }
+
+    /// Past the top or bottom edge with the button down: one line per tick.
+    fn start_autoscroll(&mut self, cx: &mut Context<Self>) {
+        if self.auto_running {
+            return;
+        }
+        self.auto_running = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(60))
+                    .await;
+                let go = this
+                    .update(cx, |v, cx| {
+                        if v.drag_from.is_none() || v.auto_dir == 0 {
+                            v.auto_running = false;
+                            return false;
+                        }
+                        v.auto_tick(cx);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !go {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// Esc: with a selection it only clears the selection; otherwise it is

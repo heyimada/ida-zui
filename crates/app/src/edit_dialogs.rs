@@ -939,3 +939,129 @@ impl Render for ApplyPatchesDialog {
             )
     }
 }
+
+// ---- Comments --------------------------------------------------------------------
+
+/// `:` / `;`: the comment as a multi-line text. Enter inserts a newline,
+/// Ctrl+Enter applies, Esc cancels.
+pub struct CommentDialog {
+    session: Entity<Session>,
+    ea: Ea,
+    repeatable: bool,
+    editor: Entity<zui_editor::Editor>,
+    focus: FocusHandle,
+    _sub: Subscription,
+}
+
+impl EventEmitter<DialogEvent> for CommentDialog {}
+
+impl CommentDialog {
+    pub fn new(
+        session: Entity<Session>,
+        ea: Ea,
+        repeatable: bool,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let theme = Theme::get(cx);
+        let editor = cx.new(|cx| {
+            let mut e = zui_editor::Editor::new(cx)
+                .with_text(text)
+                .with_theme(theme.editor())
+                .with_font(
+                    code_font_name(),
+                    px(crate::theme::code_font_size()),
+                    px(crate::theme::code_line_height()),
+                )
+                .with_gutter(false);
+            e.set_own_scrollbars(false);
+            e
+        });
+        let sub = cx.subscribe(&editor, |d, _, ev: &zui_editor::EditorEvent, cx| {
+            if matches!(ev, zui_editor::EditorEvent::Submit) {
+                d.submit(cx);
+            }
+        });
+        Self {
+            session,
+            ea,
+            repeatable,
+            editor,
+            focus: cx.focus_handle(),
+            _sub: sub,
+        }
+    }
+
+    fn submit(&mut self, cx: &mut Context<Self>) {
+        let text = self.editor.read(cx).text();
+        let (ea, repeatable) = (self.ea, self.repeatable);
+        self.session.update(cx, |s, cx| {
+            s.mutate(
+                ida_proto::SetComment {
+                    ea,
+                    text,
+                    repeatable,
+                },
+                cx,
+            )
+        });
+        cx.emit(DialogEvent::Close);
+    }
+}
+
+impl Focusable for CommentDialog {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.editor.read(cx).focus_handle(cx)
+    }
+}
+
+impl Render for CommentDialog {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = Theme::get(cx);
+        frame(&t, 640.)
+            .key_context("Modal")
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|_, _: &Cancel, _, cx| cx.emit(DialogEvent::Close)))
+            .child(header(
+                &t,
+                format!(
+                    "{} at {:X}",
+                    if self.repeatable {
+                        "Repeatable comment"
+                    } else {
+                        "Comment"
+                    },
+                    self.ea
+                ),
+                cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Close)),
+            ))
+            .child(
+                body()
+                    .child(
+                        div()
+                            .h(px(180.))
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(hsla(t.border_strong))
+                            .bg(hsla(t.surface))
+                            .overflow_hidden()
+                            .child(self.editor.clone()),
+                    )
+                    .child(caption(
+                        &t,
+                        "Enter inserts a new line. Ctrl+Enter applies, Esc cancels. An empty comment removes it.",
+                    )),
+            )
+            .child(
+                footer(&t)
+                    .child(
+                        button("comment-cancel", "Cancel", ButtonKind::Secondary, &t)
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Close))),
+                    )
+                    .child(
+                        button("comment-ok", "Apply", ButtonKind::Primary, &t)
+                            .on_click(cx.listener(|d, _, _, cx| d.submit(cx))),
+                    ),
+            )
+    }
+}

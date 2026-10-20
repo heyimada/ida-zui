@@ -54,8 +54,18 @@ pub struct ContextMenuRequest {
     pub keyboard: bool,
 }
 
+/// A view asks for the comment editor (`commands::comment_ea`).
+pub struct CommentRequest {
+    pub ea: Ea,
+    pub repeatable: bool,
+    pub text: String,
+}
+
 pub enum SessionEvent {
     ContextMenu(ContextMenuRequest),
+    EditComment(CommentRequest),
+    /// The marked positions were (re)loaded.
+    MarksChanged,
     /// The caret moved within a view (or onto another token).
     CaretChanged,
     Opened,
@@ -135,6 +145,8 @@ pub struct Session {
     /// How each operand of the item at the cursor is shown (check marks of
     /// Edit > Operand); refreshed by `Focus` after the caret settles.
     pub op_repr: Vec<ida_proto::OpReprRow>,
+    /// The marked positions (IDA's bookmarks), for the listing gutter.
+    pub marks: Vec<ida_proto::MarkRow>,
     /// Function and name lists, shared by the side panel and jump-anywhere.
     pub functions: Rc<Vec<ida_proto::FuncRow>>,
     pub names: Rc<Vec<ida_proto::NameRow>>,
@@ -175,6 +187,7 @@ impl Session {
             log: Vec::new(),
             status: StatusLine::default(),
             op_repr: Vec::new(),
+            marks: Vec::new(),
             functions: Rc::default(),
             names: Rc::default(),
             analysis: None,
@@ -275,6 +288,28 @@ impl Session {
                 cx.notify();
             })
             .ok();
+        })
+        .detach();
+    }
+
+    /// Output panel > Clear.
+    pub fn clear_log(&mut self, cx: &mut Context<Self>) {
+        self.log.clear();
+        cx.notify();
+    }
+
+    /// Re-reads the marked positions.
+    pub fn reload_marks(&mut self, cx: &mut Context<Self>) {
+        let fut = self.call(ida_proto::MarkList {});
+        cx.spawn(async move |this, cx| {
+            if let Ok(rows) = fut.await {
+                this.update(cx, |s, cx| {
+                    s.marks = rows;
+                    cx.emit(SessionEvent::MarksChanged);
+                    cx.notify();
+                })
+                .ok();
+            }
         })
         .detach();
     }
@@ -425,6 +460,7 @@ impl Session {
                         s.analysis = None;
                         s.dirty = fresh;
                         s.reload_lists(cx);
+                        s.reload_marks(cx);
                         s.dbg = DebugModel::new();
                         s.dbg_load_bpts(cx);
                         s.dbg_load_exceptions(cx);
@@ -790,6 +826,7 @@ impl Session {
         self.ext_pending = false;
         self.ext_task = None;
         self.dbg = DebugModel::new();
+        self.marks.clear();
         cx.emit(SessionEvent::Closed);
         cx.notify();
     }

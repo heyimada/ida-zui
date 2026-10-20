@@ -78,6 +78,9 @@ pub struct ListingView {
     drag_from: Option<usize>,
     /// The caret column to keep when a refresh after an edit reloads the rows.
     keep_col: Option<usize>,
+    /// Drag-select past an edge: which way, and whether the ticker runs.
+    auto_dir: isize,
+    auto_running: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -90,7 +93,7 @@ impl ListingView {
             }
             SessionEvent::Opened => this.load_segments(cx),
             SessionEvent::Rebased { .. } => this.load_segments(cx),
-            SessionEvent::DebugChanged => cx.notify(),
+            SessionEvent::DebugChanged | SessionEvent::MarksChanged => cx.notify(),
             SessionEvent::Changed => this.refresh(cx),
             SessionEvent::Closed => {
                 this.rows.clear();
@@ -125,6 +128,8 @@ impl ListingView {
             sel: Anchor::default(),
             drag_from: None,
             keep_col: None,
+            auto_dir: 0,
+            auto_running: false,
             _subs: vec![sub],
         }
     }
@@ -650,6 +655,17 @@ impl ListingView {
             self.drag_from = None;
             return;
         }
+        if let Some(b) = self.hit.bounds {
+            self.auto_dir = crate::selection::edge_direction(
+                f32::from(ev.position.y),
+                f32::from(b.top()),
+                f32::from(b.bottom()),
+            );
+            if self.auto_dir != 0 {
+                self.start_autoscroll(cx);
+                return;
+            }
+        }
         let Some((row, col)) = self.hit.hit(ev.position) else {
             return;
         };
@@ -660,6 +676,42 @@ impl ListingView {
             self.publish_cursor(cx);
             cx.notify();
         }
+    }
+
+    fn auto_tick(&mut self, cx: &mut Context<Self>) {
+        if let Some(from) = self.drag_from {
+            self.sel.begin(from);
+            self.step(self.auto_dir, cx);
+        }
+    }
+
+    /// Past the top or bottom edge with the button down: one line per tick.
+    fn start_autoscroll(&mut self, cx: &mut Context<Self>) {
+        if self.auto_running {
+            return;
+        }
+        self.auto_running = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(60))
+                    .await;
+                let go = this
+                    .update(cx, |v, cx| {
+                        if v.drag_from.is_none() || v.auto_dir == 0 {
+                            v.auto_running = false;
+                            return false;
+                        }
+                        v.auto_tick(cx);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !go {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// The bytes of the selected lines, or of the item at the caret: from the
@@ -766,6 +818,7 @@ impl ListingView {
                 let cw = code::char_width(window);
                 let gutter = cw * 26. + px(code::MARK_W);
                 let marks = code::DebugMarks::read(view.session.read(cx));
+                let bookmarks: Vec<Ea> = view.session.read(cx).marks.iter().map(|m| m.ea).collect();
                 let text_left = bounds.left() + gutter + px(14.);
                 let text_x = text_left - scroll_x;
                 window.paint_quad(gpui::fill(
@@ -844,6 +897,15 @@ impl ListingView {
                         );
                         if own {
                             marks.paint(ea, bounds.left(), y, &theme, window);
+                            if bookmarks.contains(&ea) {
+                                code::paint_mark(
+                                    bounds.left() + px(code::MARK_W - 2.),
+                                    y,
+                                    px(line_height()),
+                                    &theme,
+                                    window,
+                                );
+                            }
                         }
                         hit.rows.push((i, y, shaped));
                     }

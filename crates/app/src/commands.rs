@@ -58,30 +58,14 @@ pub fn comment_ea(session: &Entity<Session>, ea: Ea, repeatable: bool, cx: &mut 
     let session2 = session.clone();
     cx.spawn(async move |cx| {
         let current = fut.await.unwrap_or_default();
-        session2.update(cx, |s, cx| {
-            let target = cx.entity();
-            let title = if repeatable {
-                "Repeatable comment"
-            } else {
-                "Comment"
-            };
-            s.prompt(
-                format!("{title} at {}", fmt_ea(ea)),
-                current,
-                move |text, cx| {
-                    target.update(cx, |s, cx| {
-                        s.mutate(
-                            SetComment {
-                                ea,
-                                text,
-                                repeatable,
-                            },
-                            cx,
-                        )
-                    });
+        session2.update(cx, |_, cx| {
+            cx.emit(crate::session::SessionEvent::EditComment(
+                crate::session::CommentRequest {
+                    ea,
+                    repeatable,
+                    text: current,
                 },
-                cx,
-            );
+            ))
         });
     })
     .detach();
@@ -123,8 +107,14 @@ pub fn follow_token(session: &Entity<Session>, token: String, from: Ea, cx: &mut
     cx.spawn(async move |cx| {
         let result = fut.await;
         session2.update(cx, |s, cx| match result {
-            Ok(Some(ea)) => s.navigate(ea, cx),
-            Ok(None) => s.info_msg(format!("'{token}' is not a location"), cx),
+            Ok(Some(ea))
+                if s.info
+                    .as_ref()
+                    .is_none_or(|i| crate::focus::is_database_address(ea, i.min_ea, i.max_ea)) =>
+            {
+                s.navigate(ea, cx)
+            }
+            Ok(_) => s.info_msg(format!("'{token}' is not a location"), cx),
             Err(e) => s.error(e.to_string(), cx),
         });
     })
@@ -176,8 +166,19 @@ pub fn token_target(
         expr: token,
         from: fallback,
     });
+    let (min, max) = session
+        .read(cx)
+        .info
+        .as_ref()
+        .map_or((0, u64::MAX), |i| (i.min_ea, i.max_ea));
     cx.spawn(async move |cx| {
-        let ea = fut.await.ok().flatten().unwrap_or(fallback);
+        // A stack variable resolves to its frame offset: not an item to look up.
+        let ea = fut
+            .await
+            .ok()
+            .flatten()
+            .filter(|ea| crate::focus::is_database_address(*ea, min, max))
+            .unwrap_or(fallback);
         cx.update(|cx| then(ea, cx));
     })
     .detach();

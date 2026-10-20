@@ -975,6 +975,28 @@ impl Render for TypesView {
                             .min_h_0()
                             .relative()
                             .child(self.editor.clone())
+                            .on_mouse_down(
+                                gpui::MouseButton::Right,
+                                cx.listener(|v, ev: &gpui::MouseDownEvent, _, cx| {
+                                    let focus = v.editor.read(cx).focus_handle(cx);
+                                    let me = cx.entity();
+                                    let apply = crate::menubar::run_entry(
+                                        "Apply",
+                                        "Ctrl+S",
+                                        move |_, cx| me.update(cx, |v, cx| v.apply(cx)),
+                                    );
+                                    let entries =
+                                        crate::context_menu::editor_entries(focus, vec![apply]);
+                                    crate::context_menu::show(
+                                        &v.session,
+                                        ev.position,
+                                        "Declaration",
+                                        entries,
+                                        false,
+                                        cx,
+                                    );
+                                }),
+                            )
                             .child(editor_bar),
                     )
                     .child(self.render_messages(theme, window, cx)),

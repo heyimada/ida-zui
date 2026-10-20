@@ -158,6 +158,31 @@ pub fn hex(cx: &App) -> Vec<Entry> {
     ]
 }
 
+/// Cut, Copy, Paste and Select all for a text editor (the type editors and the
+/// Python input), plus `extra` entries (Apply). The editor takes the focus
+/// first so the commands act on it.
+pub fn editor_entries(focus: gpui::FocusHandle, extra: Vec<Entry>) -> Vec<Entry> {
+    let act = |label: &'static str, key: &'static str, make: fn() -> Box<dyn Action>| {
+        let focus = focus.clone();
+        run_entry(label, key, move |window, cx| {
+            window.focus(&focus, cx);
+            window.dispatch_action(make(), cx);
+        })
+    };
+    let mut out = vec![
+        act("Cut", "Ctrl+X", || Box::new(zui_editor::Cut)),
+        act("Copy", "Ctrl+C", || Box::new(zui_editor::Copy)),
+        act("Paste", "Ctrl+V", || Box::new(zui_editor::Paste)),
+        Entry::Sep,
+        act("Select all", "Ctrl+A", || Box::new(zui_editor::SelectAll)),
+    ];
+    if !extra.is_empty() {
+        out.push(Entry::Sep);
+        out.extend(extra);
+    }
+    out
+}
+
 /// The menu of a row that stands for an address (side lists, inspector and
 /// bottom-panel rows): jump, cross references, rename, copy.
 pub fn address_row(

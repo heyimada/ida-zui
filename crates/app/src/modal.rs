@@ -22,6 +22,8 @@ pub enum ChoiceValue {
     /// Run this with whatever it captured (a chooser whose rows do something
     /// of their own, such as picking a structure for an operand).
     Run(Rc<dyn Fn(&mut App)>),
+    /// A marked position (address, slot): Enter jumps, Del removes it.
+    Mark(Ea, u32),
 }
 
 impl Clone for ChoiceValue {
@@ -31,6 +33,7 @@ impl Clone for ChoiceValue {
             Self::Action(a) => Self::Action(a.boxed_clone()),
             Self::Doc(k) => Self::Doc(k.clone()),
             Self::Run(f) => Self::Run(f.clone()),
+            Self::Mark(ea, slot) => Self::Mark(*ea, *slot),
         }
     }
 }
@@ -52,6 +55,8 @@ pub struct Choice {
 pub enum ModalEvent {
     Dismiss,
     Pick(ChoiceValue),
+    /// Del on the selected row of a list whose rows can be removed.
+    Delete(ChoiceValue),
     /// Free text submitted (no choice picked).
     Submit(String),
 }
@@ -89,6 +94,9 @@ pub struct Modal {
 }
 
 impl EventEmitter<ModalEvent> for Modal {}
+
+/// Width of the kind-badge column in a result row.
+const KIND_W: f32 = 52.;
 
 /// Results shown at most; the list is rebuilt on every keystroke.
 const MAX_RESULTS: usize = 80;
@@ -390,6 +398,10 @@ impl Modal {
         let t = *theme;
         let q = self.input.read(cx).value().trim().to_owned();
         let count = self.filtered.len();
+        let any_kind = self
+            .filtered
+            .iter()
+            .any(|&i| !self.choices[i].kind.is_empty());
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let mut last: Option<SharedString> = None;
         for (ix, &ci) in self.filtered.iter().enumerate() {
@@ -448,6 +460,10 @@ impl Modal {
                     .on_click(
                         cx.listener(move |_, _, _, cx| cx.emit(ModalEvent::Pick(value.clone()))),
                     )
+                    // A fixed column for the badge, so names line up whatever the badge says.
+                    .when(any_kind && c.kind.is_empty(), |d| {
+                        d.child(div().w(px(KIND_W)).flex_none())
+                    })
                     .when(!c.kind.is_empty(), |d| {
                         let b = if c.kind.len() <= 4
                             && c.kind.chars().all(|ch| ch.is_ascii_lowercase())
@@ -459,7 +475,7 @@ impl Modal {
                         } else {
                             ui::badge(c.kind.clone(), BadgeKind::Neutral, &t).min_w(px(28.))
                         };
-                        d.child(b)
+                        d.child(div().w(px(KIND_W)).flex_none().flex().child(b))
                     })
                     .child(
                         div()
@@ -484,6 +500,10 @@ impl Modal {
                     .into_any_element(),
             );
         }
+        let deletable = self
+            .choices
+            .iter()
+            .any(|c| matches!(c.value, ChoiceValue::Mark(..)));
         let results = format!("{count} result{}", if count == 1 { "" } else { "s" });
         let hint = |keys: &str, what: &str| {
             div()
@@ -579,6 +599,7 @@ impl Modal {
                     .text_color(hsla(t.muted))
                     .child(hint("↑↓", "select"))
                     .child(hint("Enter", enter))
+                    .when(deletable, |d| d.child(hint("Del", "remove")))
                     .child(hint("Esc", "close")),
             )
     }
@@ -609,6 +630,16 @@ impl Render for Modal {
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(|m, _: &SelectPrev, _, cx| m.step(-1, cx)))
             .on_action(cx.listener(|m, _: &SelectNext, _, cx| m.step(1, cx)))
+            .on_action(cx.listener(|m, _: &crate::input::Delete, _, cx| {
+                let pick = m
+                    .filtered
+                    .get(m.selected)
+                    .map(|&i| m.choices[i].value.clone());
+                match pick {
+                    Some(v @ ChoiceValue::Mark(..)) => cx.emit(ModalEvent::Delete(v)),
+                    _ => cx.propagate(),
+                }
+            }))
             .rounded(px(8.))
             .overflow_hidden()
             .bg(hsla(theme.popover))

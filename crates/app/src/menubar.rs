@@ -28,6 +28,8 @@ pub struct ViewState {
     pub inspector: bool,
     pub bottom: bool,
     pub split: bool,
+    /// Pseudocode is shown without casts (this database).
+    pub hide_casts: bool,
     /// A process exists (running or suspended).
     pub debug_active: bool,
     pub debug_suspended: bool,
@@ -448,6 +450,9 @@ pub fn build(
                 c!(Back),
                 c!(Forward),
                 Entry::Sep,
+                c!(MarkPosition, "Mark position…"),
+                c!(JumpToMark, "Jump to marked position…"),
+                Entry::Sep,
                 c!(PrevFunction),
                 c!(NextFunction),
                 Entry::Sep,
@@ -483,6 +488,7 @@ pub fn build(
                 c!(ShowPseudocode, "Pseudocode"),
                 c!(TogglePseudocode, "Switch to pseudocode pane"),
                 toggle(c!(ToggleSplit, "Split with pseudocode"), view.split),
+                toggle(c!(ToggleHideCasts, "Hide casts"), view.hide_casts),
                 Entry::Sep,
                 Entry::Sub {
                     label: "Open subviews".into(),

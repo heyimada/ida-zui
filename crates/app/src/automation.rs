@@ -16,6 +16,7 @@
 //   (open_url: Help > Documentation and Report an issue append `url: <url>` to <file>.done instead of opening a browser)
 //   clipdump             appends the in-process clipboard to <file>.done as `clipboard: <text>` (newlines as \\n)
 //   rightclick <x> <y>   a right click; shiftclick <x> <y> a left click with Shift held
+//   down|heldmove|up <x> <y>  the button held across steps
 //   drag <x1> <y1> <x2> <y2>  press, move with the button held, release
 use gpui::{
     AnyWindowHandle, App, AppContext, ExternalPaths, FileDropEvent, Keystroke, Modifiers,
@@ -191,6 +192,32 @@ fn run(line: &str, channel: &std::path::Path, window: &mut Window, cx: &mut App)
                     cx,
                 );
             }
+            true
+        }),
+        // The button held across steps: `down x y`, `heldmove x y`, `up x y`.
+        "down" | "heldmove" | "up" => xy().is_some_and(|position| {
+            let modifiers = Modifiers::default();
+            let event = match cmd {
+                "down" => PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position,
+                    modifiers,
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                "heldmove" => PlatformInput::MouseMove(MouseMoveEvent {
+                    position,
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers,
+                }),
+                _ => PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position,
+                    modifiers,
+                    click_count: 1,
+                }),
+            };
+            window.dispatch_event(event, cx);
             true
         }),
         // Press at (x1, y1), move to (x2, y2) with the button held, release.

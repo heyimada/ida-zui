@@ -26,6 +26,7 @@ Files in `crates/app`:
 | `code.rs` | Painting and hit-testing tagged lines. |
 | `commands.rs` | Shared rename, comment, type, follow and edit helpers. |
 | `actions.rs` | The command catalog: every action with label, default keys, search aliases and `needs_db`. Bindings, palette, menus, shortcut editor and help all derive from it. |
+| `list_table.rs` | Sort comparators, header-click state and column widths of the side-list tables (pure, unit-tested); `sidebar.rs` draws them and saves them in `settings.json` (`side_tables`). |
 | `selection.rs` | Line / byte selection anchor and the text Copy produces (listing, graph block, pseudocode, hex). Pure and unit-tested. |
 | `context_menu.rs` | The entries of the right-click / Menu key menus, built from the catalog; `show` asks the workspace to open one through `SessionEvent::ContextMenu` and the menu bar draws it (`MenuBar::open_popup`). |
 | `operands.rs`, `edit_dialogs.rs`, `workspace/edit.rs` | Edit > Operand types, Array, String type, Edit function and Patch program: pure helpers (unit-tested), the dialogs, and the workspace commands. |

@@ -48,7 +48,7 @@ impl Default for PanelLayout {
             inspector: true,
             bottom: true,
             split: false,
-            sidebar_w: 264.,
+            sidebar_w: 380.,
             inspector_w: 300.,
             bottom_h: 152.,
             rail: "functions".to_owned(),
@@ -152,6 +152,12 @@ pub struct Settings {
     pub recent: Vec<Recent>,
     pub layout: PanelLayout,
     pub debugger: DebuggerSettings,
+    /// Sort and column widths of the side lists, by list (`functions`, ...).
+    pub side_tables: BTreeMap<String, crate::list_table::TableState>,
+    /// The Segments strip under the side lists is expanded.
+    pub segments_open: bool,
+    /// Bytes per group in the hex view: 1, 2, 4 or 8.
+    pub hex_group: u64,
 }
 
 impl Default for Settings {
@@ -173,6 +179,9 @@ impl Default for Settings {
             recent: Vec::new(),
             layout: PanelLayout::default(),
             debugger: DebuggerSettings::default(),
+            side_tables: BTreeMap::new(),
+            segments_open: true,
+            hex_group: 8,
         }
     }
 }

@@ -3,13 +3,15 @@
 use crate::actions::{Confirm, SelectNext, SelectPrev};
 use crate::docs::DocKey;
 use crate::input::{InputEvent, TextInput};
+use crate::list_table::{self, SortKey, TableState};
 use crate::scrollbar::{self, Axes, Source};
 use crate::session::{Session, SessionEvent};
+use crate::settings;
 use crate::theme::{Theme, code_font_name, hsla};
 use crate::ui;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, ScrollStrategy, SharedString, Subscription,
-    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    App, Context, Entity, FocusHandle, Focusable, ScrollHandle, ScrollStrategy, SharedString,
+    Subscription, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 use ida_proto::{Ea, Exports, Imports, SegRow, Segments, Strings, TypeList};
 use std::rc::Rc;
@@ -81,6 +83,66 @@ impl Tab {
     }
 }
 
+/// A column of a table list: title, default width, whether it takes the
+/// free space, and whether its text is numeric (monospace, right-aligned).
+struct ColSpec {
+    title: &'static str,
+    width: f32,
+    grow: bool,
+    numeric: bool,
+}
+
+const fn col(title: &'static str, width: f32, grow: bool, numeric: bool) -> ColSpec {
+    ColSpec {
+        title,
+        width,
+        grow,
+        numeric,
+    }
+}
+
+const FUNCTION_COLS: [ColSpec; 5] = [
+    col("Name", 130., true, false),
+    col("Segment", 60., false, false),
+    col("Start", 78., false, true),
+    col("Length", 52., false, true),
+    col("Flags", 56., false, false),
+];
+const NAME_COLS: [ColSpec; 3] = [
+    col("Address", 78., false, true),
+    col("Name", 160., true, false),
+    col("Type", 56., false, false),
+];
+const STRING_COLS: [ColSpec; 4] = [
+    col("Address", 78., false, true),
+    col("Length", 56., false, true),
+    col("Type", 52., false, false),
+    col("String", 160., true, false),
+];
+const IMPORT_COLS: [ColSpec; 4] = [
+    col("Address", 78., false, true),
+    col("Ordinal", 58., false, true),
+    col("Name", 160., true, false),
+    col("Library", 100., false, false),
+];
+const EXPORT_COLS: [ColSpec; 3] = [
+    col("Name", 160., true, false),
+    col("Address", 78., false, true),
+    col("Ordinal", 58., false, true),
+];
+
+/// The columns of a table list; `None` for the lists that stay plain rows.
+fn columns(tab: Tab) -> Option<&'static [ColSpec]> {
+    match tab {
+        Tab::Functions => Some(&FUNCTION_COLS),
+        Tab::Names => Some(&NAME_COLS),
+        Tab::Strings => Some(&STRING_COLS),
+        Tab::Imports => Some(&IMPORT_COLS),
+        Tab::Exports => Some(&EXPORT_COLS),
+        Tab::Segments | Tab::Types => None,
+    }
+}
+
 #[derive(Clone)]
 struct Item {
     label: SharedString,
@@ -93,6 +155,11 @@ struct Item {
     doc: Option<DocKey>,
     /// The mangled name when `label` is its demangled form (tooltip; also filterable).
     mangled: Option<SharedString>,
+    /// Table lists: the text of each column, what each sorts by, and the
+    /// flag badges of the Flags column.
+    cells: Vec<SharedString>,
+    sort: Vec<SortKey>,
+    flags: Vec<&'static str>,
 }
 
 impl Item {
@@ -112,20 +179,38 @@ impl Item {
             badge: None,
             doc: None,
             mangled: None,
+            cells: Vec::new(),
+            sort: Vec::new(),
+            flags: Vec::new(),
         }
     }
 
-    /// Shows `short` (when there is one) and keeps `name` as the tooltip and
-    /// the filter key.
-    fn demangled(name: String, short: String, detail: String, ea: Ea) -> Self {
-        if short.is_empty() || short == name {
-            return Self::new(name, detail, Some(ea));
+    /// A row of a table list: the cells, their sort keys, the name that names
+    /// the row (menus, copy) and the text the filter searches.
+    fn table(
+        name: String,
+        ea: Ea,
+        cells: Vec<String>,
+        sort: Vec<SortKey>,
+        mangled: Option<String>,
+    ) -> Self {
+        let mut key = cells.join(" ").to_lowercase();
+        if let Some(m) = &mangled {
+            key.push(' ');
+            key.push_str(&m.to_lowercase());
         }
-        let mut it = Self::new(short, detail, Some(ea));
-        it.key.push(' ');
-        it.key.push_str(&name.to_lowercase());
-        it.mangled = Some(name.into());
-        it
+        Self {
+            label: name.into(),
+            detail: SharedString::default(),
+            key,
+            ea: Some(ea),
+            badge: None,
+            doc: None,
+            mangled: mangled.map(Into::into),
+            cells: cells.into_iter().map(Into::into).collect(),
+            sort,
+            flags: Vec::new(),
+        }
     }
 }
 
@@ -141,6 +226,12 @@ pub struct Sidebar {
     segments: Rc<Vec<SegRow>>,
     loading: bool,
     scroll: UniformListScrollHandle,
+    /// Horizontal scroll of a table wider than the panel.
+    hscroll: ScrollHandle,
+    /// Sort and widths of the table showing.
+    table: TableState,
+    /// A column edge being dragged: (column, last x).
+    resizing: Option<(usize, f32)>,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -186,11 +277,73 @@ impl Sidebar {
             segments: Rc::default(),
             loading: false,
             scroll: UniformListScrollHandle::new(),
+            hscroll: ScrollHandle::new(),
+            table: TableState::default(),
+            resizing: None,
             focus: cx.focus_handle(),
             _subs: vec![s1, s2],
         };
+        me.table = me.saved_table(cx);
         me.rebuild(cx);
         me
+    }
+
+    /// The sort and widths saved for the current list.
+    fn saved_table(&self, cx: &App) -> TableState {
+        settings::get(cx)
+            .side_tables
+            .get(self.tab.key())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn save_table(&self, cx: &mut Context<Self>) {
+        let (key, state) = (self.tab.key().to_owned(), self.table.clone());
+        settings::update(cx, move |s| {
+            s.side_tables.insert(key, state);
+        });
+    }
+
+    /// The column widths to draw.
+    fn widths(&self, cols: &[ColSpec]) -> Vec<f32> {
+        let defaults: Vec<f32> = cols.iter().map(|c| c.width).collect();
+        self.table.widths_or(&defaults)
+    }
+
+    /// A click on a header: sort by that column, or flip the direction.
+    fn click_header(&mut self, col: usize, cx: &mut Context<Self>) {
+        self.table.click(col);
+        self.save_table(cx);
+        self.refilter(cx);
+        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+    }
+
+    /// Dragging a column edge.
+    fn drag_edge(&mut self, x: f32, cx: &mut Context<Self>) {
+        let Some((col, last)) = self.resizing else {
+            return;
+        };
+        let Some(cols) = columns(self.tab) else {
+            return;
+        };
+        let mut widths = self.widths(cols);
+        if let Some(w) = widths.get_mut(col) {
+            *w = list_table::resized(*w, x - last);
+        }
+        self.table.widths = widths;
+        self.resizing = Some((col, x));
+        cx.notify();
+    }
+
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if self.resizing.take().is_some() {
+            self.save_table(cx);
+        }
+    }
+
+    /// The segment that holds `ea`.
+    fn segment_at(&self, ea: Ea) -> Option<&SegRow> {
+        self.segments.iter().find(|s| ea >= s.start && ea < s.end)
     }
 
     /// Selects the function that contains `ea` in the Functions list.
@@ -232,6 +385,10 @@ impl Sidebar {
             if let Ok(rows) = fut.await {
                 this.update(cx, |v, cx| {
                     v.segments = Rc::new(rows);
+                    // The Segment and Type columns of Functions / Names read them.
+                    if matches!(v.tab, Tab::Functions | Tab::Names) {
+                        v.rebuild(cx);
+                    }
                     cx.notify();
                 })
                 .ok();
@@ -254,6 +411,7 @@ impl Sidebar {
     fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         self.tab = tab;
         self.selected = 0;
+        self.table = self.saved_table(cx);
         let hint = format!("Filter {}", tab.label().to_lowercase());
         self.filter.update(cx, |f, cx| f.set_placeholder(&hint, cx));
         self.rebuild(cx);
@@ -266,13 +424,36 @@ impl Sidebar {
                 s.functions
                     .iter()
                     .map(|f| {
-                        let mut it =
-                            Item::new(f.name.clone(), format!("{:X}", f.start), Some(f.start));
-                        if f.library {
-                            it.badge = Some(("lib".into(), 0));
-                        } else if f.thunk {
-                            it.badge = Some(("thunk".into(), 1));
-                        }
+                        let seg = self
+                            .segment_at(f.start)
+                            .map(|s| s.name.clone())
+                            .unwrap_or_default();
+                        let len = f.end.saturating_sub(f.start);
+                        let flags: Vec<&'static str> = [(f.library, "lib"), (f.thunk, "thunk")]
+                            .into_iter()
+                            .filter(|(on, _)| *on)
+                            .map(|(_, n)| n)
+                            .collect();
+                        let mut it = Item::table(
+                            f.name.clone(),
+                            f.start,
+                            vec![
+                                f.name.clone(),
+                                seg.clone(),
+                                format!("{:X}", f.start),
+                                format!("{len:X}"),
+                                flags.join(" "),
+                            ],
+                            vec![
+                                SortKey::text(&f.name),
+                                SortKey::text(&seg),
+                                SortKey::Num(f.start),
+                                SortKey::Num(len),
+                                SortKey::text(&flags.join(" ")),
+                            ],
+                            None,
+                        );
+                        it.flags = flags;
                         it
                     })
                     .collect(),
@@ -280,7 +461,26 @@ impl Sidebar {
             Tab::Names => Some(
                 s.names
                     .iter()
-                    .map(|n| Item::new(n.name.clone(), format!("{:X}", n.ea), Some(n.ea)))
+                    .map(|n| {
+                        let kind = if s.function_at(n.ea).is_some_and(|f| f.start == n.ea) {
+                            "func".to_owned()
+                        } else {
+                            self.segment_at(n.ea)
+                                .map(|g| g.class.to_lowercase())
+                                .unwrap_or_default()
+                        };
+                        Item::table(
+                            n.name.clone(),
+                            n.ea,
+                            vec![format!("{:X}", n.ea), n.name.clone(), kind.clone()],
+                            vec![
+                                SortKey::Num(n.ea),
+                                SortKey::text(&n.name),
+                                SortKey::text(&kind),
+                            ],
+                            None,
+                        )
+                    })
                     .collect(),
             ),
             tab => self
@@ -315,15 +515,24 @@ impl Sidebar {
                     f.await.map_err(|e| e.to_string()).map(|v| {
                         v.into_iter()
                             .map(|r| {
-                                let mut it = Item::new(
-                                    r.text.replace(['\r', '\n'], " "),
-                                    format!("{:X}", r.ea),
-                                    Some(r.ea),
-                                );
-                                if r.kind != "C" {
-                                    it.badge = Some((r.kind.into(), 2));
-                                }
-                                it
+                                let text = r.text.replace(['\r', '\n'], " ");
+                                Item::table(
+                                    text.clone(),
+                                    r.ea,
+                                    vec![
+                                        format!("{:X}", r.ea),
+                                        r.len.to_string(),
+                                        r.kind.clone(),
+                                        text.clone(),
+                                    ],
+                                    vec![
+                                        SortKey::Num(r.ea),
+                                        SortKey::Num(u64::from(r.len)),
+                                        SortKey::text(&r.kind),
+                                        SortKey::text(&text),
+                                    ],
+                                    None,
+                                )
                             })
                             .collect()
                     })
@@ -335,13 +544,34 @@ impl Sidebar {
                     f.await.map_err(|e| e.to_string()).map(|v| {
                         v.into_iter()
                             .map(|r| {
-                                let mut it =
-                                    Item::demangled(r.name, r.short, format!("{:X}", r.ea), r.ea);
-                                it.badge = Some((r.module.to_lowercase().into(), 1));
-                                it.key.push(' ');
-                                it.key
-                                    .push_str(&it.badge.as_ref().unwrap().0.to_lowercase());
-                                it
+                                let shown = if r.short.is_empty() {
+                                    r.name.clone()
+                                } else {
+                                    r.short.clone()
+                                };
+                                let mangled = (shown != r.name).then(|| r.name.clone());
+                                let ordinal = if r.ordinal == 0 {
+                                    String::new()
+                                } else {
+                                    r.ordinal.to_string()
+                                };
+                                Item::table(
+                                    shown.clone(),
+                                    r.ea,
+                                    vec![
+                                        format!("{:X}", r.ea),
+                                        ordinal,
+                                        shown.clone(),
+                                        r.module.clone(),
+                                    ],
+                                    vec![
+                                        SortKey::Num(r.ea),
+                                        SortKey::Num(u64::from(r.ordinal)),
+                                        SortKey::text(&shown),
+                                        SortKey::text(&r.module),
+                                    ],
+                                    mangled,
+                                )
                             })
                             .collect()
                     })
@@ -352,7 +582,29 @@ impl Sidebar {
                 Box::pin(async move {
                     f.await.map_err(|e| e.to_string()).map(|v| {
                         v.into_iter()
-                            .map(|r| Item::demangled(r.name, r.short, format!("{:X}", r.ea), r.ea))
+                            .map(|r| {
+                                let shown = if r.short.is_empty() {
+                                    r.name.clone()
+                                } else {
+                                    r.short.clone()
+                                };
+                                let mangled = (shown != r.name).then(|| r.name.clone());
+                                Item::table(
+                                    shown.clone(),
+                                    r.ea,
+                                    vec![
+                                        shown.clone(),
+                                        format!("{:X}", r.ea),
+                                        r.ordinal.to_string(),
+                                    ],
+                                    vec![
+                                        SortKey::text(&shown),
+                                        SortKey::Num(r.ea),
+                                        SortKey::Num(r.ordinal),
+                                    ],
+                                    mangled,
+                                )
+                            })
                             .collect()
                     })
                 })
@@ -434,6 +686,17 @@ impl Sidebar {
                 .map(|(i, _)| i)
                 .collect()
         };
+        let mut filtered = filtered;
+        if let Some(col) = self.table.sort
+            && columns(self.tab).is_some_and(|c| col < c.len())
+        {
+            let keys: Vec<SortKey> = self
+                .items
+                .iter()
+                .map(|it| it.sort.get(col).cloned().unwrap_or(SortKey::Num(0)))
+                .collect();
+            list_table::sort_order(&keys, &mut filtered, !self.table.descending);
+        }
         self.filtered = Rc::new(filtered);
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
         cx.notify();
@@ -520,20 +783,23 @@ impl Render for Sidebar {
         let count = filtered.len();
         let entity = cx.entity();
         let tab = self.tab;
+        let cols = columns(tab);
+        let widths = cols.map(|c| self.widths(c)).unwrap_or_default();
+        let total_w: f32 = widths.iter().sum();
+        let rows_widths = widths.clone();
         let list = uniform_list("sidebar-items", count, move |range, _window, _cx| {
             range
                 .map(|ix| {
                     let it = &items[filtered[ix]];
                     let entity = entity.clone();
                     let on = ix == selected;
-                    div()
+                    let row = div()
                         .id(ix)
                         .w_full()
                         .h(px(24.))
                         .flex()
                         .items_center()
-                        .gap(px(8.))
-                        .px(px(12.))
+                        .when(cols.is_none(), |d| d.gap(px(8.)).px(px(12.)))
                         .cursor_pointer()
                         .text_size(px(12.))
                         .text_color(hsla(theme.text))
@@ -559,37 +825,98 @@ impl Render for Sidebar {
                                     v.activate(ix, cx)
                                 }
                             })
-                        })
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(it.label.clone()),
-                        )
-                        .when_some(it.badge.clone(), |d, (b, _)| {
-                            d.child(ui::badge(b, ui::BadgeKind::Neutral, &theme))
-                        })
-                        .when(tab != Tab::Types || !it.detail.is_empty(), |d| {
-                            d.child(
+                        });
+                    match cols {
+                        Some(cols) => row.children(cols.iter().enumerate().map(|(c, spec)| {
+                            let text = it.cells.get(c).cloned().unwrap_or_default();
+                            let w = rows_widths.get(c).copied().unwrap_or(spec.width);
+                            table_cell(spec, w, &theme)
+                                .when(spec.numeric, |d| {
+                                    d.font_family(code_font_name())
+                                        .text_size(px(11.))
+                                        .text_color(hsla(theme.muted))
+                                })
+                                .when(spec.title == "Flags", |d| {
+                                    d.children(
+                                        it.flags
+                                            .iter()
+                                            .map(|f| ui::badge(*f, ui::BadgeKind::Neutral, &theme)),
+                                    )
+                                })
+                                .when(spec.title != "Flags", |d| d.child(text))
+                        })),
+                        None => row
+                            .child(
                                 div()
-                                    .flex_none()
-                                    .font_family(code_font_name())
-                                    .text_size(px(11.))
-                                    .text_color(hsla(theme.muted))
-                                    .child(it.detail.clone()),
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(it.label.clone()),
                             )
-                        })
+                            .when_some(it.badge.clone(), |d, (b, _)| {
+                                d.child(ui::badge(b, ui::BadgeKind::Neutral, &theme))
+                            })
+                            .when(!it.detail.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .flex_none()
+                                        .font_family(code_font_name())
+                                        .text_size(px(11.))
+                                        .text_color(hsla(theme.muted))
+                                        .child(it.detail.clone()),
+                                )
+                            }),
+                    }
                 })
                 .collect()
         })
         .track_scroll(&self.scroll)
         .flex_1();
 
+        let header = cols.map(|cols| self.render_table_header(cols, &widths, &theme, cx));
+        let body = scrollbar::area(list, bar);
+        let table: gpui::AnyElement = match header {
+            Some(header) => {
+                let hbar = scrollbar::scrollbar(
+                    "sidebar-hscroll",
+                    Source::handle(&self.hscroll),
+                    Axes::BOTH,
+                    &theme,
+                    window,
+                    cx,
+                );
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .id("sidebar-table-x")
+                            .size_full()
+                            .overflow_x_scroll()
+                            .track_scroll(&self.hscroll)
+                            .child(
+                                div()
+                                    .min_w(px(total_w))
+                                    .h_full()
+                                    .flex()
+                                    .flex_col()
+                                    .child(header)
+                                    .child(body),
+                            ),
+                    )
+                    .child(hbar)
+                    .into_any_element()
+            }
+            None => body.into_any_element(),
+        };
+
         let segments = (tab != Tab::Segments && !self.segments.is_empty())
-            .then(|| self.render_segments(&theme));
+            .then(|| self.render_segments(&theme, cx));
         div()
             .key_context("List")
             .track_focus(&self.focus)
@@ -605,6 +932,19 @@ impl Render for Sidebar {
                 let s = v.selected;
                 v.activate(s, cx)
             }))
+            .on_mouse_move(cx.listener(|v, ev: &gpui::MouseMoveEvent, _, cx| {
+                if v.resizing.is_some() {
+                    if ev.pressed_button == Some(gpui::MouseButton::Left) {
+                        v.drag_edge(f32::from(ev.position.x), cx);
+                    } else {
+                        v.end_drag(cx);
+                    }
+                }
+            }))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|v, _, _, cx| v.end_drag(cx)),
+            )
             .size_full()
             .flex()
             .flex_col()
@@ -637,26 +977,129 @@ impl Render for Sidebar {
                     ),
             )
             .child(div().px(px(8.)).pb(px(8.)).child(self.filter.clone()))
-            .child(scrollbar::area(list, bar))
+            .child(table)
             .when_some(segments, |d, s| d.child(s))
+    }
+}
+
+/// One cell of a table row or header: the column's width (the growing column
+/// takes what is left, never less than its width), clipped with an ellipsis.
+fn table_cell(spec: &ColSpec, width: f32, _theme: &Theme) -> gpui::Div {
+    let d = div()
+        .h_full()
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .px(px(8.))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis();
+    if spec.grow {
+        d.flex_1().min_w(px(width))
+    } else {
+        d.w(px(width)).flex_none()
+    }
+}
+
+impl Sidebar {
+    /// Column titles: a click sorts (the arrow shows the direction), the edge
+    /// drags to resize.
+    fn render_table_header(
+        &self,
+        cols: &'static [ColSpec],
+        widths: &[f32],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let t = *theme;
+        div()
+            .h(px(24.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .bg(hsla(t.surface))
+            .border_y_1()
+            .border_color(hsla(t.border))
+            .text_size(px(11.))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(hsla(t.muted))
+            .children(cols.iter().enumerate().map(|(c, spec)| {
+                let sorted = self.table.sort == Some(c);
+                let arrow = if !sorted {
+                    ""
+                } else if self.table.descending {
+                    "\u{2193}"
+                } else {
+                    "\u{2191}"
+                };
+                let w = widths.get(c).copied().unwrap_or(spec.width);
+                table_cell(spec, w, &t)
+                    .id(("side-col", c))
+                    .relative()
+                    .cursor_pointer()
+                    .when(sorted, |d| d.text_color(hsla(t.text)))
+                    .hover(|d| d.bg(hsla(t.hover)))
+                    .on_click(cx.listener(move |v, _, _, cx| v.click_header(c, cx)))
+                    .child(spec.title)
+                    .child(arrow)
+                    .child(
+                        div()
+                            .id(("side-col-edge", c))
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .right_0()
+                            .w(px(5.))
+                            .cursor(gpui::CursorStyle::ResizeLeftRight)
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
+                                    v.resizing = Some((c, f32::from(ev.position.x)));
+                                    cx.stop_propagation();
+                                }),
+                            ),
+                    )
+            }))
     }
 }
 
 impl Sidebar {
     /// A compact segment table under the list, as in the design's main window.
-    fn render_segments(&self, theme: &Theme) -> gpui::Div {
+    fn render_segments(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
         let t = *theme;
-        let rows: Vec<_> = self.segments.iter().take(8).collect();
+        let open = settings::get(cx).segments_open;
+        let rows: Vec<_> = if open {
+            self.segments.iter().take(8).collect()
+        } else {
+            Vec::new()
+        };
         div()
             .flex_none()
             .border_t_1()
             .border_color(hsla(t.border))
             .child(
                 div()
+                    .id("segments-toggle")
                     .h(px(28.))
                     .flex()
                     .items_center()
-                    .px(px(12.))
+                    .gap(px(4.))
+                    .px(px(8.))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hsla(t.hover)))
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        settings::update(cx, |s| s.segments_open = !s.segments_open);
+                        cx.notify();
+                    }))
+                    .child(ui::icon(
+                        if open {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        },
+                        12.,
+                        hsla(t.muted),
+                    ))
                     .child(ui::section_label("Segments", &t))
                     .child(div().flex_1())
                     .child(

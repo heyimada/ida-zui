@@ -15,6 +15,7 @@
 #   click:<x>,<y>      move + left click, same coordinates
 #   dblclick:<x>,<y>   click twice, the second with click count 2
 #   shiftclick:<x>,<y> click with Shift held; rightclick:<x>,<y> a right click
+#   down:<x>,<y> / heldmove:<x>,<y> / up:<x>,<y>  the left button held across steps (drag-select past an edge)
 #   drag:<x1>,<y1>,<x2>,<y2>  press at the first point, move with the button held, release at the second
 #   confirm:<n>        answer button n (1-based) of an in-app question
 #   drop:<path>[|<path>]  simulate files dropped on the window (in-process, via gpui's file-drop events)
@@ -167,6 +168,9 @@ try {
             "shiftclick" { Send ("shiftclick " + ($arg -replace ",", " ")) }
             "rightclick" { Send ("rightclick " + ($arg -replace ",", " ")) }
             "drag" { Send ("drag " + ($arg -replace ",", " ")) }
+            "down" { Send ("down " + ($arg -replace ",", " ")) }
+            "heldmove" { Send ("heldmove " + ($arg -replace ",", " ")) }
+            "up" { Send ("up " + ($arg -replace ",", " ")) }
             "clipassert" {
                 $syncName = "clipassert-" + [guid]::NewGuid().ToString("N")
                 Send "clipdump"

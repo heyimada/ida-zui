@@ -5,18 +5,134 @@ use crate::code::{self, line_height};
 use crate::scrollbar::{self, Axes, Axis, Metrics, Source};
 use crate::selection::{Anchor, BytesFormat, bytes_text};
 use crate::session::{Origin, Session, SessionEvent};
+use crate::settings;
 use crate::theme::{Theme, hsla};
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Pixels, Point, ScrollWheelEvent, Subscription, Window, canvas, div, point,
-    prelude::*, px,
+    App, Bounds, Context, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Pixels, Point, ScrollWheelEvent, Subscription, Window, canvas,
+    div, point, prelude::*, px,
 };
-use ida_proto::{ByteChunk, Bytes, DbgMemRead, Ea, SegRow, Segments};
+use ida_proto::{ByteChunk, Bytes, DbgMemRead, Ea, PatchBytes, PatchList, SegRow, Segments};
 use std::collections::{HashMap, HashSet};
 
 const PAGE: u64 = 4096;
 const ROW: u64 = 16;
 const MAX_PAGES: usize = 512;
+
+/// Where the columns of a row sit, in characters from the view's left edge:
+/// 18 characters of address, a gap, then 16 bytes as `XX ` with one extra
+/// space between groups of `group` bytes, a gap, and the ASCII.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cols {
+    /// Bytes per group: 1, 2, 4 or 8.
+    pub group: u64,
+}
+
+impl Cols {
+    pub const HEX0: f32 = 20.;
+
+    pub fn new(group: u64) -> Self {
+        Self {
+            group: if matches!(group, 1 | 2 | 4 | 8) {
+                group
+            } else {
+                8
+            },
+        }
+    }
+
+    /// The first character of byte `col` (0..16) in the hex column.
+    pub fn hex_x(&self, col: u64) -> f32 {
+        Self::HEX0 + col as f32 * 3. + (col / self.group) as f32
+    }
+
+    /// The first character of the ASCII column.
+    pub fn ascii_x(&self) -> f32 {
+        Self::HEX0 + 48. + (ROW / self.group - 1) as f32 + 2.
+    }
+
+    /// The byte under character `x`, in either column.
+    pub fn col_at(&self, x: f32) -> Option<u64> {
+        let hex_end = self.hex_x(ROW - 1) + 2.;
+        if x >= Self::HEX0 && x < hex_end + 1. {
+            // Each byte owns its two digits and the space after them.
+            let col = (0..ROW).rev().find(|c| x >= self.hex_x(*c))?;
+            return Some(col);
+        }
+        let a = self.ascii_x();
+        (x >= a && x < a + ROW as f32).then_some((x - a) as u64)
+    }
+
+    /// The header row: `00 01 02 ...` spaced like the bytes below it.
+    pub fn header(&self) -> String {
+        let mut out = String::new();
+        for i in 0..ROW {
+            if i > 0 && i % self.group == 0 {
+                out.push(' ');
+            }
+            out.push_str(&format!("{i:02X} "));
+        }
+        out
+    }
+}
+
+/// Overtyping bytes in the hex view (F2): the digits typed since the caret
+/// was where `start` is. Nothing reaches the database until it is committed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HexEdit {
+    pub start: Ea,
+    pub bytes: Vec<u8>,
+    /// The first digit of a byte whose second is still to come.
+    pub half: Option<u8>,
+}
+
+impl HexEdit {
+    pub fn new(start: Ea) -> Self {
+        Self {
+            start,
+            bytes: Vec::new(),
+            half: None,
+        }
+    }
+
+    /// A typed character; false when it is not a hex digit.
+    pub fn digit(&mut self, c: char) -> bool {
+        let Some(d) = c.to_digit(16) else {
+            return false;
+        };
+        match self.half.take() {
+            Some(hi) => self.bytes.push((hi << 4) | d as u8),
+            None => self.half = Some(d as u8),
+        }
+        true
+    }
+
+    pub fn backspace(&mut self) {
+        if self.half.take().is_none() {
+            self.bytes.pop();
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty() && self.half.is_none()
+    }
+
+    /// Where the caret is: the next byte to be written.
+    pub fn caret(&self) -> Ea {
+        self.start + self.bytes.len() as Ea
+    }
+
+    /// The bytes to patch, as hex pairs; `None` when none are complete.
+    pub fn hex(&self) -> Option<String> {
+        (!self.bytes.is_empty()).then(|| {
+            self.bytes
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+    }
+}
 
 pub struct HexView {
     session: Entity<Session>,
@@ -39,8 +155,22 @@ pub struct HexView {
     sel: Anchor,
     /// The byte a mouse drag started on while the button is held.
     drag_from: Option<Ea>,
+    /// Column layout (bytes per group).
+    cols: Cols,
+    /// Patched bytes, drawn in their own colour.
+    patched: HashSet<Ea>,
+    /// Overtyping bytes (F2); `None` when not editing.
+    edit: Option<HexEdit>,
+    /// Drag-select past an edge: which way, and whether the ticker runs.
+    auto_dir: isize,
+    auto_running: bool,
+    /// The viewport has been measured (until then `show` centres on a guess).
+    measured: bool,
     _subs: Vec<Subscription>,
 }
+
+/// The header row above the bytes: `00 01 ... 0F`.
+const HEADER_ROWS: f32 = 1.;
 
 /// Selections longer than this are not copied (the clipboard is not a file).
 const MAX_COPY: u64 = 1 << 20;
@@ -48,13 +178,17 @@ const MAX_COPY: u64 = 1 << 20;
 impl HexView {
     pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
         let sub = cx.subscribe(&session, |this, _, ev, cx| match ev {
-            SessionEvent::Opened => this.load_segments(cx),
+            SessionEvent::Opened => {
+                this.load_segments(cx);
+                this.load_patches(cx);
+            }
             SessionEvent::Navigated { ea, .. } => this.show(*ea, true, cx),
             SessionEvent::CursorMoved { ea, origin } if *origin != Origin::Hex => {
                 this.show(*ea, false, cx)
             }
             SessionEvent::Changed => {
                 this.pages.clear();
+                this.load_patches(cx);
                 cx.notify();
             }
             SessionEvent::DebugChanged => {
@@ -72,6 +206,8 @@ impl HexView {
             SessionEvent::Closed => {
                 this.segs.clear();
                 this.pages.clear();
+                this.patched.clear();
+                this.edit = None;
                 cx.notify();
             }
             _ => {}
@@ -93,8 +229,114 @@ impl HexView {
             process: false,
             sel: Anchor::default(),
             drag_from: None,
+            cols: Cols::new(settings::get(cx).hex_group),
+            patched: HashSet::new(),
+            edit: None,
+            measured: false,
+            auto_dir: 0,
+            auto_running: false,
             _subs: vec![sub],
         }
+    }
+
+    /// Which bytes are patched, for the colour.
+    fn load_patches(&mut self, cx: &mut Context<Self>) {
+        if !self.session.read(cx).is_ready() {
+            return;
+        }
+        let fut = self.session.read(cx).call(PatchList {});
+        cx.spawn(async move |this, cx| {
+            if let Ok(rows) = fut.await {
+                this.update(cx, |v, cx| {
+                    v.patched = rows.into_iter().map(|r| r.ea).collect();
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// F2: starts overtyping bytes at the caret, or commits what was typed.
+    fn toggle_edit(&mut self, cx: &mut Context<Self>) {
+        match self.edit.take() {
+            Some(e) => self.commit_edit(e, cx),
+            None => {
+                if self.shows_process(cx) {
+                    self.session.update(cx, |s, cx| {
+                        s.info_msg("Process memory cannot be edited here", cx)
+                    });
+                    return;
+                }
+                self.sel.clear();
+                self.edit = Some(HexEdit::new(self.cursor));
+                self.session.update(cx, |s, cx| {
+                    s.info_msg(
+                        "Hex edit: type hex digits, Enter or F2 applies, Esc cancels",
+                        cx,
+                    )
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    /// Writes what was typed as a patch (the originals stay recoverable).
+    fn commit_edit(&mut self, e: HexEdit, cx: &mut Context<Self>) {
+        if e.is_empty() {
+            return;
+        }
+        if let Some(hex) = e.hex() {
+            self.session
+                .update(cx, |s, cx| s.mutate(PatchBytes { ea: e.start, hex }, cx));
+        }
+        self.cursor = e.caret();
+    }
+
+    /// Keys while overtyping: digits write, Backspace takes back, Enter
+    /// applies, Esc cancels. (The view's key context is `HexEdit` then, so
+    /// the one-letter commands do not fire.)
+    fn on_edit_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        let Some(edit) = self.edit.as_mut() else {
+            return;
+        };
+        let key = ev.keystroke.key.as_str();
+        match key {
+            "enter" => {
+                if let Some(e) = self.edit.take() {
+                    self.commit_edit(e, cx);
+                }
+            }
+            "escape" => {
+                if let Some(e) = self.edit.take() {
+                    self.cursor = e.start;
+                }
+            }
+            "backspace" => edit.backspace(),
+            _ => {
+                let typed = ev.keystroke.key_char.as_deref().unwrap_or(key);
+                let mut chars = typed.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(c), None)
+                        if !ev.keystroke.modifiers.control
+                            && !ev.keystroke.modifiers.alt
+                            && edit.digit(c) =>
+                    {
+                        self.cursor = edit.caret();
+                    }
+                    _ => return,
+                }
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Group control: bytes per group.
+    fn set_group(&mut self, group: u64, cx: &mut Context<Self>) {
+        self.cols = Cols::new(group);
+        settings::update(cx, move |s| s.hex_group = group);
+        cx.notify();
     }
 
     fn load_segments(&mut self, cx: &mut Context<Self>) {
@@ -281,23 +523,16 @@ impl HexView {
     /// The byte under `pos`, in the hex or the ASCII column.
     fn byte_at(&self, pos: Point<Pixels>) -> Option<Ea> {
         let b = self.bounds?;
-        let y = f32::from(pos.y - b.top());
+        let y = f32::from(pos.y - b.top()) - HEADER_ROWS * line_height();
+        if y < 0. {
+            return None;
+        }
         let row = (self.top.floor()
             + ((y + (self.top.fract() as f32) * line_height()) / line_height()).floor() as f64)
             as u64;
         let x = f32::from(pos.x - b.left()) / self.char_w;
-        // Layout in characters: 18 addr + 2 gap, then 16 x "XX " plus a gap after 8, then 2 + ascii.
-        let hex0 = 20.;
-        let col = if x >= hex0 && x < hex0 + 49. {
-            let c = x - hex0;
-            let c = if c > 24. { c - 1. } else { c };
-            Some((c / 3.) as u64)
-        } else if x >= hex0 + 51. && x < hex0 + 67. {
-            Some((x - hex0 - 51.) as u64)
-        } else {
-            None
-        };
-        Some(self.ea_of_row(row)? + col?.min(15))
+        let col = self.cols.col_at(x)?;
+        Some(self.ea_of_row(row)? + col.min(15))
     }
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -326,9 +561,9 @@ impl HexView {
         let (Some(b), Some(row)) = (self.bounds, self.row_of(self.cursor)) else {
             return point(px(200.), px(200.));
         };
-        let y = (row as f64 - self.top + 1.) as f32 * line_height();
-        let col = (self.cursor % ROW) as f32;
-        b.origin + point(px((20. + col * 3.) * self.char_w), px(y))
+        let y = (row as f64 - self.top + 1. + f64::from(HEADER_ROWS)) as f32 * line_height();
+        let col = self.cursor % ROW;
+        b.origin + point(px(self.cols.hex_x(col) * self.char_w), px(y))
     }
 
     /// Right click: the caret goes to the clicked byte first (unless it is
@@ -364,6 +599,17 @@ impl HexView {
             self.drag_from = None;
             return;
         }
+        if let Some(b) = self.bounds {
+            self.auto_dir = crate::selection::edge_direction(
+                f32::from(ev.position.y),
+                f32::from(b.top()),
+                f32::from(b.bottom()),
+            );
+            if self.auto_dir != 0 {
+                self.start_autoscroll(cx);
+                return;
+            }
+        }
         if let Some(byte) = self.byte_at(ev.position)
             && byte != self.cursor
         {
@@ -373,6 +619,42 @@ impl HexView {
                 .update(cx, |s, cx| s.set_cursor(byte, Origin::Hex, cx));
             cx.notify();
         }
+    }
+
+    fn auto_tick(&mut self, cx: &mut Context<Self>) {
+        if let Some(from) = self.drag_from {
+            self.sel.begin(from as usize);
+            self.step_rows(self.auto_dir as i64, cx);
+        }
+    }
+
+    /// Past the top or bottom edge with the button down: one line per tick.
+    fn start_autoscroll(&mut self, cx: &mut Context<Self>) {
+        if self.auto_running {
+            return;
+        }
+        self.auto_running = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(60))
+                    .await;
+                let go = this
+                    .update(cx, |v, cx| {
+                        if v.drag_from.is_none() || v.auto_dir == 0 {
+                            v.auto_running = false;
+                            return false;
+                        }
+                        v.auto_tick(cx);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !go {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// Esc: with a selection it only clears the selection; otherwise it is
@@ -497,9 +779,15 @@ impl HexView {
                 let marks = code::DebugMarks::read(v.session.read(cx));
                 let first = v.top.floor() as u64;
                 let frac = (v.top - v.top.floor()) as f32;
-                let rows = (f32::from(bounds.size.height) / line_height()).ceil() as usize + 1;
+                let head_h = px(HEADER_ROWS * line_height());
+                let rows = ((f32::from(bounds.size.height) - f32::from(head_h)) / line_height())
+                    .ceil() as usize
+                    + 1;
                 let cursor = v.cursor;
                 let selected = v.sel.range(cursor as usize);
+                let cols = v.cols;
+                let patched = v.patched.clone();
+                let edit = v.edit.clone();
                 let mut lines = Vec::new();
                 for k in 0..rows {
                     let r = first + k as u64;
@@ -512,117 +800,215 @@ impl HexView {
                     lines.push((k, base, bytes));
                 }
                 let focused = v.focus.is_focused(window);
-                window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-                    for (k, base, bytes) in lines {
-                        let y = bounds.top() + px((k as f32 - frac) * line_height());
-                        // The selected bytes of this row: the hex cells and the ASCII.
-                        if let Some(sel) = &selected {
-                            let (lo, hi) = (*sel.start() as Ea, *sel.end() as Ea);
-                            if hi >= base && lo < base + ROW {
-                                let a = lo.max(base) - base;
-                                let b = hi.min(base + ROW - 1) - base;
-                                let hx =
-                                    |c: u64| 20. + c as f32 * 3. + if c >= 8 { 1. } else { 0. };
-                                for (x, w) in [
-                                    (hx(a), hx(b) + 2. - hx(a)),
-                                    (20. + 51. + a as f32, (b - a + 1) as f32),
-                                ] {
-                                    window.paint_quad(gpui::fill(
-                                        Bounds::new(
-                                            point(bounds.left() + cw * x, y),
-                                            gpui::size(cw * w, px(line_height())),
-                                        ),
-                                        hsla(theme.selection),
-                                    ));
+                let rows_bounds = Bounds::new(
+                    point(bounds.left(), bounds.top() + head_h),
+                    gpui::size(bounds.size.width, bounds.size.height - head_h),
+                );
+                let cell = |col: u64| (cols.hex_x(col), cols.ascii_x() + col as f32);
+                window.with_content_mask(
+                    Some(gpui::ContentMask {
+                        bounds: rows_bounds,
+                    }),
+                    |window| {
+                        for (k, base, bytes) in lines {
+                            let y = rows_bounds.top() + px((k as f32 - frac) * line_height());
+                            // The selected bytes of this row: the hex cells and the ASCII.
+                            if let Some(sel) = &selected {
+                                let (lo, hi) = (*sel.start() as Ea, *sel.end() as Ea);
+                                if hi >= base && lo < base + ROW {
+                                    let a = lo.max(base) - base;
+                                    let b = hi.min(base + ROW - 1) - base;
+                                    for (x, w) in [
+                                        (cell(a).0, cell(b).0 + 2. - cell(a).0),
+                                        (cell(a).1, (b - a + 1) as f32),
+                                    ] {
+                                        window.paint_quad(gpui::fill(
+                                            Bounds::new(
+                                                point(bounds.left() + cw * x, y),
+                                                gpui::size(cw * w, px(line_height())),
+                                            ),
+                                            hsla(theme.selection),
+                                        ));
+                                    }
                                 }
                             }
-                        }
-                        if cursor >= base && cursor < base + ROW && selected.is_none() {
-                            code::paint_row_bg(bounds, y, hsla(theme.caret_row), window);
-                            let col = (cursor - base) as f32;
-                            let hx = 20. + col * 3. + if col >= 8. { 1. } else { 0. };
-                            let ax = 20. + 51. + col;
-                            for (x, w) in [(hx, 2.), (ax, 1.)] {
-                                window.paint_quad(gpui::fill(
-                                    Bounds::new(
-                                        point(bounds.left() + cw * x, y),
-                                        gpui::size(cw * w, px(line_height())),
-                                    ),
-                                    if focused {
-                                        hsla(theme.selection)
-                                    } else {
-                                        hsla(theme.raised)
-                                    },
-                                ));
-                            }
-                        }
-                        // The instruction pointer and breakpoint bytes.
-                        let tints = marks
-                            .ip
-                            .map(|ip| (ip, hsla(theme.accent).opacity(0.45)))
-                            .into_iter()
-                            .chain(
-                                marks
-                                    .bpts
-                                    .iter()
-                                    .filter(|(_, on)| *on)
-                                    .map(|(ea, _)| (*ea, hsla(theme.danger).opacity(0.4))),
-                            );
-                        for (ea, color) in tints {
-                            if ea >= base && ea < base + ROW {
-                                let col = (ea - base) as f32;
-                                let hx = 20. + col * 3. + if col >= 8. { 1. } else { 0. };
-                                let ax = 20. + 51. + col;
+                            if cursor >= base && cursor < base + ROW && selected.is_none() {
+                                code::paint_row_bg(rows_bounds, y, hsla(theme.caret_row), window);
+                                let (hx, ax) = cell(cursor - base);
                                 for (x, w) in [(hx, 2.), (ax, 1.)] {
                                     window.paint_quad(gpui::fill(
                                         Bounds::new(
                                             point(bounds.left() + cw * x, y),
                                             gpui::size(cw * w, px(line_height())),
                                         ),
-                                        color,
+                                        if focused {
+                                            hsla(theme.selection)
+                                        } else {
+                                            hsla(theme.raised)
+                                        },
                                     ));
                                 }
                             }
-                        }
-                        let mut hex = String::with_capacity(52);
-                        let mut ascii = String::with_capacity(16);
-                        for (i, b) in bytes.iter().enumerate() {
-                            if i == 8 {
-                                hex.push(' ');
+                            // The instruction pointer and breakpoint bytes.
+                            let tints = marks
+                                .ip
+                                .map(|ip| (ip, hsla(theme.accent).opacity(0.45)))
+                                .into_iter()
+                                .chain(
+                                    marks
+                                        .bpts
+                                        .iter()
+                                        .filter(|(_, on)| *on)
+                                        .map(|(ea, _)| (*ea, hsla(theme.danger).opacity(0.4))),
+                                );
+                            for (ea, color) in tints {
+                                if ea >= base && ea < base + ROW {
+                                    let (hx, ax) = cell(ea - base);
+                                    for (x, w) in [(hx, 2.), (ax, 1.)] {
+                                        window.paint_quad(gpui::fill(
+                                            Bounds::new(
+                                                point(bounds.left() + cw * x, y),
+                                                gpui::size(cw * w, px(line_height())),
+                                            ),
+                                            color,
+                                        ));
+                                    }
+                                }
                             }
-                            match b {
-                                Some(Some(b)) => {
-                                    hex.push_str(&format!("{b:02X} "));
-                                    ascii.push(if b.is_ascii_graphic() || *b == b' ' {
-                                        *b as char
+                            // The bytes: patched ones and bytes being typed in their own colours.
+                            let (normal, patched_c, edited) =
+                                (hsla(theme.text), hsla(theme.warning), hsla(theme.accent));
+                            let mut hex = String::with_capacity(52);
+                            let mut hex_runs: Vec<(usize, gpui::Hsla)> = Vec::new();
+                            let mut ascii = String::with_capacity(16);
+                            let mut ascii_runs: Vec<(usize, gpui::Hsla)> = Vec::new();
+                            for (i, b) in bytes.iter().enumerate() {
+                                let ea = base + i as u64;
+                                if i > 0 && (i as u64).is_multiple_of(cols.group) {
+                                    hex.push(' ');
+                                    hex_runs.push((1, normal));
+                                }
+                                let typed = edit.as_ref().and_then(|e| {
+                                    if ea >= e.start && ea < e.caret() {
+                                        Some(Some(e.bytes[(ea - e.start) as usize]))
+                                    } else if ea == e.caret() {
+                                        e.half.map(|_| None)
                                     } else {
-                                        '.'
-                                    });
-                                }
-                                Some(None) => {
-                                    hex.push_str("?? ");
-                                    ascii.push(' ');
-                                }
-                                None => {
-                                    hex.push_str("   ");
-                                    ascii.push(' ');
-                                }
+                                        None
+                                    }
+                                });
+                                let (cell_hex, glyph, color) = match (typed, b) {
+                                    (Some(Some(t)), _) => (
+                                        format!("{t:02X} "),
+                                        if t.is_ascii_graphic() || t == b' ' {
+                                            t as char
+                                        } else {
+                                            '.'
+                                        },
+                                        edited,
+                                    ),
+                                    (Some(None), _) => (
+                                        format!(
+                                            "{:X}_ ",
+                                            edit.as_ref().and_then(|e| e.half).unwrap_or(0)
+                                        ),
+                                        ' ',
+                                        edited,
+                                    ),
+                                    (None, Some(Some(b))) => (
+                                        format!("{b:02X} "),
+                                        if b.is_ascii_graphic() || *b == b' ' {
+                                            *b as char
+                                        } else {
+                                            '.'
+                                        },
+                                        if patched.contains(&ea) {
+                                            patched_c
+                                        } else {
+                                            normal
+                                        },
+                                    ),
+                                    (None, Some(None)) => ("?? ".to_owned(), ' ', normal),
+                                    (None, None) => ("   ".to_owned(), ' ', normal),
+                                };
+                                hex_runs.push((cell_hex.len(), color));
+                                hex.push_str(&cell_hex);
+                                ascii.push(glyph);
+                                ascii_runs.push((
+                                    glyph.len_utf8(),
+                                    if color == normal {
+                                        hsla(theme.syntax.str)
+                                    } else {
+                                        color
+                                    },
+                                ));
                             }
+                            let addr = code::shape_plain(
+                                window,
+                                &format!("{base:016X}"),
+                                hsla(theme.faint),
+                            );
+                            code::paint_shaped(
+                                &addr,
+                                point(bounds.left() + cw * 1., y),
+                                window,
+                                cx,
+                            );
+                            let h = code::shape_colored(window, &hex, &hex_runs);
+                            code::paint_shaped(
+                                &h,
+                                point(bounds.left() + cw * Cols::HEX0, y),
+                                window,
+                                cx,
+                            );
+                            let a = code::shape_colored(window, &ascii, &ascii_runs);
+                            code::paint_shaped(
+                                &a,
+                                point(bounds.left() + cw * cols.ascii_x(), y),
+                                window,
+                                cx,
+                            );
                         }
-                        let addr =
-                            code::shape_plain(window, &format!("{base:016X}"), hsla(theme.faint));
-                        code::paint_shaped(&addr, point(bounds.left() + cw * 1., y), window, cx);
-                        let h = code::shape_plain(window, &hex, hsla(theme.text));
-                        code::paint_shaped(&h, point(bounds.left() + cw * 20., y), window, cx);
-                        let a = code::shape_plain(window, &ascii, hsla(theme.syntax.str));
-                        code::paint_shaped(&a, point(bounds.left() + cw * 71., y), window, cx);
-                    }
-                });
-                let viewport = (f32::from(bounds.size.height) / line_height()) as usize;
+                    },
+                );
+                // The header: offsets over the byte columns (the rows scroll under it).
+                window.paint_quad(gpui::fill(
+                    Bounds::new(bounds.origin, gpui::size(bounds.size.width, head_h)),
+                    hsla(theme.surface2),
+                ));
+                window.paint_quad(gpui::fill(
+                    Bounds::new(
+                        point(bounds.left(), bounds.top() + head_h - px(1.)),
+                        gpui::size(bounds.size.width, px(1.)),
+                    ),
+                    hsla(theme.border),
+                ));
+                let label = code::shape_plain(window, "Address", hsla(theme.faint));
+                code::paint_shaped(
+                    &label,
+                    point(bounds.left() + cw * 1., bounds.top()),
+                    window,
+                    cx,
+                );
+                let head = code::shape_plain(window, &cols.header(), hsla(theme.muted));
+                code::paint_shaped(
+                    &head,
+                    point(bounds.left() + cw * Cols::HEX0, bounds.top()),
+                    window,
+                    cx,
+                );
+                let viewport =
+                    ((f32::from(bounds.size.height) / line_height()) - HEADER_ROWS) as usize;
                 entity.update(cx, |v, cx| {
                     v.bounds = Some(bounds);
                     v.char_w = f32::from(cw);
                     v.viewport_rows = viewport.max(1);
+                    if !v.measured {
+                        // The first layout: the caret was placed for a guessed height.
+                        v.measured = true;
+                        let at = v.cursor;
+                        v.show(at, true, cx);
+                    }
                     v.request_pages(first, rows, cx);
                 });
             },
@@ -662,10 +1048,16 @@ impl Render for HexView {
         );
         let bar = scrollbar::scrollbar("hex-scroll", source, Axes::V, &theme, window, cx);
         let page = self.viewport_rows.max(2) as i64 - 1;
+        let editing = self.edit.is_some();
+        let group = self.cols.group;
+        let t = theme;
         div()
             .id("hex")
-            .key_context("CodeView")
+            .key_context(if editing { "HexEdit" } else { "CodeView" })
             .track_focus(&self.focus)
+            .on_key_down(cx.listener(|v, ev: &KeyDownEvent, _, cx| v.on_edit_key(ev, cx)))
+            // F2 is "toggle breakpoint" elsewhere; here it is IDA's hex edit mode.
+            .on_action(cx.listener(|v, _: &ToggleBreakpoint, _, cx| v.toggle_edit(cx)))
             .size_full()
             .relative()
             .overflow_hidden()
@@ -712,12 +1104,42 @@ impl Render for HexView {
                 v.session.update(cx, |s, cx| s.navigate(ea, cx));
             }))
             .child(self.render_canvas(cx))
+            // The group control, in the header row.
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right(px(14.))
+                    .h(px(line_height()))
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .text_size(px(11.))
+                    .child(div().text_color(hsla(t.faint)).pr(px(4.)).child("Group"))
+                    .children([1u64, 2, 4, 8].map(|g| {
+                        let on = g == group;
+                        div()
+                            .id(("hex-group", g as usize))
+                            .px(px(6.))
+                            .rounded(px(3.))
+                            .cursor_pointer()
+                            .text_color(hsla(if on { t.text } else { t.muted }))
+                            .when(on, |d| d.bg(hsla(t.accent_soft)))
+                            .when(!on, |d| d.hover(|d| d.bg(hsla(t.hover))))
+                            .on_click(cx.listener(move |v, _, window, cx| {
+                                // A clickable child keeps the press from reaching the view's focus.
+                                window.focus(&v.focus, cx);
+                                v.set_group(g, cx)
+                            }))
+                            .child(g.to_string())
+                    })),
+            )
             .when(self.shows_process(cx), |d| {
                 d.child(
                     div()
                         .absolute()
-                        .top(px(6.))
-                        .left(px(700.))
+                        .top(px(30.))
+                        .right(px(14.))
                         .child(crate::ui::badge(
                             "PROCESS MEMORY",
                             crate::ui::BadgeKind::XrefWrite,
@@ -726,5 +1148,114 @@ impl Render for HexView {
                 )
             })
             .child(bar)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn groups_of_eight_keep_the_classic_layout() {
+        let c = Cols::new(8);
+        assert_eq!(c.hex_x(0), 20.);
+        assert_eq!(c.hex_x(7), 41.);
+        assert_eq!(c.hex_x(8), 45., "one extra space after the eighth byte");
+        assert_eq!(c.ascii_x(), 71.);
+    }
+
+    #[test]
+    fn a_smaller_group_adds_a_space_after_every_group() {
+        let c = Cols::new(2);
+        assert_eq!(c.hex_x(1), 23.);
+        assert_eq!(c.hex_x(2), 27., "a space between the pairs");
+        assert_eq!(c.ascii_x(), 20. + 48. + 7. + 2.);
+        let one = Cols::new(1);
+        assert_eq!(one.hex_x(3), 20. + 9. + 3.);
+    }
+
+    #[test]
+    fn an_unknown_group_falls_back_to_eight() {
+        assert_eq!(Cols::new(3), Cols::new(8));
+        assert_eq!(Cols::new(0), Cols::new(8));
+    }
+
+    #[test]
+    fn every_byte_is_found_by_its_own_cells_in_both_columns() {
+        for g in [1, 2, 4, 8] {
+            let c = Cols::new(g);
+            for col in 0..ROW {
+                assert_eq!(c.col_at(c.hex_x(col) + 0.5), Some(col), "hex, group {g}");
+                assert_eq!(c.col_at(c.hex_x(col) + 1.5), Some(col), "hex, group {g}");
+                assert_eq!(
+                    c.col_at(c.ascii_x() + col as f32 + 0.5),
+                    Some(col),
+                    "ascii, group {g}"
+                );
+            }
+            assert_eq!(c.col_at(3.), None, "the address is no byte");
+            assert_eq!(
+                c.col_at(c.ascii_x() + ROW as f32 + 0.5),
+                None,
+                "past the ASCII"
+            );
+        }
+    }
+
+    #[test]
+    fn typing_two_digits_makes_a_byte_and_one_leaves_a_nibble_pending() {
+        let mut e = HexEdit::new(0x1000);
+        assert!(e.digit('4'));
+        assert_eq!((e.bytes.clone(), e.half), (vec![], Some(4)));
+        assert!(e.digit('8'));
+        assert_eq!((e.bytes.clone(), e.half), (vec![0x48], None));
+        assert!(e.digit('c') && e.digit('F'));
+        assert_eq!(e.bytes, vec![0x48, 0xCF]);
+        assert_eq!(e.caret(), 0x1002, "the caret follows the bytes written");
+    }
+
+    #[test]
+    fn other_keys_are_not_digits() {
+        let mut e = HexEdit::new(0);
+        for c in ['g', ' ', '-', 'z'] {
+            assert!(!e.digit(c), "{c}");
+        }
+        assert!(e.bytes.is_empty() && e.half.is_none());
+    }
+
+    #[test]
+    fn backspace_takes_back_the_nibble_then_the_last_byte() {
+        let mut e = HexEdit::new(0x10);
+        for c in "489".chars() {
+            e.digit(c);
+        }
+        e.backspace();
+        assert_eq!((e.bytes.clone(), e.half), (vec![0x48], None));
+        e.backspace();
+        assert!(e.bytes.is_empty());
+        e.backspace();
+        assert!(e.is_empty(), "nothing left to take back");
+    }
+
+    #[test]
+    fn what_is_committed_is_the_whole_bytes_as_hex_pairs() {
+        let mut e = HexEdit::new(0x2000);
+        assert_eq!(e.hex(), None, "nothing typed, nothing to patch");
+        for c in "90cc5".chars() {
+            e.digit(c);
+        }
+        // The pending nibble is dropped, not guessed.
+        assert_eq!(e.hex().as_deref(), Some("90 CC"));
+    }
+
+    #[test]
+    fn the_header_lines_up_with_the_bytes() {
+        let c = Cols::new(8);
+        let h = c.header();
+        assert!(h.starts_with("00 01 02 03 04 05 06 07  08 09"));
+        for col in 0..ROW {
+            let at = c.hex_x(col) as usize - Cols::HEX0 as usize;
+            assert_eq!(&h[at..at + 2], format!("{col:02X}"), "column {col}");
+        }
     }
 }

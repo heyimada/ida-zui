@@ -582,6 +582,15 @@ impl PyConsole {
         }
     }
 
+    /// The whole transcript as text (the output context menu's Copy).
+    pub fn output_text(&self) -> String {
+        self.lines
+            .iter()
+            .map(|l| l.text.trim_end_matches('\n'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     pub fn clear_output(&mut self, cx: &mut Context<Self>) {
         self.lines = Rc::default();
         cx.notify();
@@ -728,7 +737,22 @@ impl Render for PyConsole {
             .flex_col()
             .bg(hsla(t.surface))
             .child(
-                div().relative().flex_1().min_h_0().flex().flex_col().child(list).child(bar).when_some(self.completions.as_ref(), |d, c| {
+                div().relative().flex_1().min_h_0().flex().flex_col().id("py-output-area").on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(|v, ev: &gpui::MouseDownEvent, _, cx| {
+                        let text = v.output_text();
+                        let me = cx.entity();
+                        let entries = vec![
+                            crate::menubar::run_entry("Copy output", "", move |_, cx| {
+                                zui_editor::clipboard::write(text.clone(), cx)
+                            }),
+                            crate::menubar::run_entry("Clear output", "", move |_, cx| {
+                                me.update(cx, |c, cx| c.clear_output(cx))
+                            }),
+                        ];
+                        crate::context_menu::show(&v.session, ev.position, "Python console", entries, false, cx);
+                    }),
+                ).child(list).child(bar).when_some(self.completions.as_ref(), |d, c| {
                     d.child(
                         div()
                             .absolute()

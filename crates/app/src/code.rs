@@ -151,6 +151,29 @@ pub fn shape_plain(window: &mut Window, text: &str, color: Hsla) -> ShapedLine {
     )
 }
 
+/// A line painted in several colours: `runs` are (byte length, colour) pieces
+/// that cover `text`.
+pub fn shape_colored(window: &mut Window, text: &str, runs: &[(usize, Hsla)]) -> ShapedLine {
+    let font = code_font();
+    let runs: Vec<TextRun> = runs
+        .iter()
+        .map(|(len, color)| TextRun {
+            len: *len,
+            font: font.clone(),
+            color: *color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        })
+        .collect();
+    window.text_system().shape_line(
+        SharedString::from(text.to_owned()),
+        px(font_size()),
+        &runs,
+        None,
+    )
+}
+
 pub fn shape_plain_sized(window: &mut Window, text: &str, color: Hsla, size: Pixels) -> ShapedLine {
     let run = TextRun {
         len: text.len(),
@@ -246,6 +269,28 @@ impl DebugMarks {
             theme,
             window,
         );
+    }
+}
+
+/// A bookmark ribbon in the gutter at `left`: marks a position set with Alt+M.
+pub fn paint_mark(
+    left: Pixels,
+    row_top: Pixels,
+    row_h: Pixels,
+    theme: &Theme,
+    window: &mut Window,
+) {
+    let (w, h) = (px(8.), row_h - px(4.));
+    let (x, y) = (left, row_top + px(2.));
+    let mut pb = gpui::PathBuilder::fill();
+    pb.move_to(point(x, y));
+    pb.line_to(point(x + w, y));
+    pb.line_to(point(x + w, y + h));
+    pb.line_to(point(x + w / 2., y + h - px(3.)));
+    pb.line_to(point(x, y + h));
+    pb.close();
+    if let Ok(path) = pb.build() {
+        window.paint_path(path, hsla(theme.warning));
     }
 }
 

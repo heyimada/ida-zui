@@ -214,6 +214,17 @@ pub const COMING_FROM_IDA: &[(&str, &str, &str)] = &[
         "same",
     ),
     (
+        "Mark position / jump to marked position",
+        "Alt+M / Ctrl+M",
+        "same (Del in the chooser removes)",
+    ),
+    ("Hide casts", "\\", "\\ in pseudocode (View > Hide casts)"),
+    (
+        "Hex edit mode",
+        "F2",
+        "F2 in the hex view (Enter applies, Esc cancels)",
+    ),
+    (
         "Select lines, copy",
         "Shift+arrows, Ctrl+C",
         "Shift+arrows, Shift+click, drag, Ctrl+C (Esc clears)",

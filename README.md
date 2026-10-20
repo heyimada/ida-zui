@@ -85,6 +85,9 @@ The defaults follow IDA's `cfg/idagui.cfg` where IDA has a key. Every key is edi
 | Pseudocode | `F5`, `Tab` | `F5`, `Tab` (`Tab` again returns) |
 | Search text / bytes, again | `Alt+T` / `Alt+B`, `Ctrl+T` / `Ctrl+B` | same |
 | Search immediate value, again | `Alt+I`, `Ctrl+I` | same |
+| Mark position / jump to marked position | `Alt+M` / `Ctrl+M` | same (a ribbon in the listing gutter; `Del` in the chooser removes a mark) |
+| Hide casts | `\` | `\` in pseudocode, also `View > Hide casts` (per database) |
+| Hex edit mode | `F2` | `F2` in the hex view: type hex digits, `Enter` or `F2` applies as a patch, `Esc` cancels |
 | Next code / data / unexplored | `Alt+C` / `Ctrl+D` / `Ctrl+U` | same |
 | Next code outside a function | `Alt+U` | `Alt+U` |
 | Functions / Names / Strings / Segments | `Shift+F3` / `Shift+F4` / `Shift+F12` / `Shift+F7` | same (side panel tabs) |
@@ -193,6 +196,8 @@ mark its own with `&` in `menubar.rs`). `Edit` also has `Operand types` (the cur
 `Report an issue` (they open the GitHub pages in your browser), `Coming from
 IDA`, the shortcut list and `About`.
 
+The side lists (Functions, Names, Strings, Imports, Exports) are tables with IDA's columns: click a header to sort (numbers by value, names ignoring case; again to reverse), drag a column edge to resize, and the sort and widths are remembered. The Segments strip under them collapses. Comments (`:` / `;`) open a multi-line editor (`Enter` is a new line, `Ctrl+Enter` applies). The hex view has an offset header, a Group control (1, 2, 4, 8 bytes) and byte editing with `F2`; patched bytes show in the warning colour. Right-click menus also exist on the Output and Python panels (Copy, Clear) and in the type editors (Cut, Copy, Paste, Select all, Apply).
+
 `Options > Settings...` (`Ctrl+,`) holds the theme (Dark, Light, High contrast,
 IDA Classic), the code font and size, the UI font size and the keyboard
 shortcut editor (click a command, press the new keys; conflicts are flagged).
@@ -230,7 +235,7 @@ IDA's defaults are used where IDA has one.
 | `-` | Expand or collapse a function or hidden range |
 | `Ctrl+W` (or `Ctrl+S`), `Ctrl+Z`, `Ctrl+Y` | Save, undo, redo |
 | `Ctrl+Shift+W` | Close the database |
-| `Shift+Up/Down/PgUp/PgDn/Home/End`, `Shift+click`, drag | Select lines (listing, graph block, pseudocode) or bytes (hex); `Esc` clears the selection |
+| `Shift+Up/Down/PgUp/PgDn/Home/End`, `Shift+click`, drag (also past the top or bottom edge, which scrolls) | Select lines (listing, graph block, pseudocode) or bytes (hex); `Esc` clears the selection |
 | `Ctrl+C` | Copy the selected lines, or the current one (hex: the bytes as `48 8B C4`); `Edit > Copy with addresses` keeps the address prefix, the hex view also copies as a C array or Python bytes, and `Ctrl+Shift+C` copies the address |
 | Right click, `Menu` key or `Ctrl+Alt+M` (`Shift+F10` stays IDA's Enums) | Context menu of the line, token, byte or list row under the caret (the same commands as the menu bar, with their shortcuts) |
 | `H` / `R` / `B` / `O` | Operand: hex or decimal / character / binary / offset |

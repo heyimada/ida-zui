@@ -215,6 +215,8 @@ impl TextInput {
         if self.selected_range.is_empty() {
             let next = self.next_boundary(self.cursor_offset());
             if self.cursor_offset() == next {
+                // Nothing to delete: the key is the owner's (a chooser's "remove").
+                cx.propagate();
                 return;
             }
             self.select_to(next, cx)

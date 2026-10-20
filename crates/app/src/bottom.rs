@@ -428,6 +428,29 @@ impl BottomPanel {
                 div()
                     .id("output-lines")
                     .size_full()
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(|v, ev: &gpui::MouseDownEvent, _, cx| {
+                            let (s1, s2) = (v.session.clone(), v.session.clone());
+                            let text = v.session.read(cx).log.join("\n");
+                            let entries = vec![
+                                crate::menubar::run_entry("Copy all output", "", move |_, cx| {
+                                    zui_editor::clipboard::write(text.clone(), cx)
+                                }),
+                                crate::menubar::run_entry("Clear", "", move |_, cx| {
+                                    s1.update(cx, |s, cx| s.clear_log(cx))
+                                }),
+                            ];
+                            crate::context_menu::show(
+                                &s2,
+                                ev.position,
+                                "Output",
+                                entries,
+                                false,
+                                cx,
+                            );
+                        }),
+                    )
                     .overflow_y_scroll()
                     .track_scroll(&oh)
                     .px(px(12.))

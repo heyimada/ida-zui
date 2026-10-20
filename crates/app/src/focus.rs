@@ -13,6 +13,32 @@ use std::time::Duration;
 
 const SETTLE: Duration = Duration::from_millis(90);
 
+/// A resolved token only stands for an item when it is an address of the
+/// database: a stack variable (`var_5F8`) resolves to its frame offset
+/// (`-0x5F8`, as a huge unsigned number), which is no place to look up xrefs.
+pub fn is_database_address(ea: Ea, min: Ea, max: Ea) -> bool {
+    ea >= min && ea < max
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_offset_is_not_an_address_but_code_and_data_are() {
+        let (min, max) = (0x1_4000_0000, 0x1_4000_8000);
+        assert!(is_database_address(0x1_4000_18C0, min, max));
+        assert!(is_database_address(min, min, max));
+        assert!(!is_database_address(max, min, max), "the end is exclusive");
+        // var_5F8 resolved as a negative number
+        assert!(!is_database_address((-0x5F8i64) as u64, min, max));
+        assert!(
+            !is_database_address(0x28, min, max),
+            "a small number such as an offset"
+        );
+    }
+}
+
 pub enum FocusEvent {
     Updated,
 }
@@ -103,6 +129,10 @@ impl Focus {
         };
         let (cursor, token, _) = key;
         let s = session.read(cx);
+        let (min, max) = s
+            .info
+            .as_ref()
+            .map_or((0, u64::MAX), |i| (i.min_ea, i.max_ea));
         let addr = s.call(AddrInfo { ea: cursor });
         let func = s.call(FuncSummary { ea: cursor });
         let resolved = token.map(|t| {
@@ -125,7 +155,11 @@ impl Focus {
             let addr = addr.await.ok();
             let func = func.await.ok().flatten();
             let resolved = match resolved {
-                Some(f) => f.await.ok().flatten(),
+                Some(f) => f
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|ea| is_database_address(*ea, min, max)),
                 None => None,
             };
             let comment = comment.await.unwrap_or_default();
