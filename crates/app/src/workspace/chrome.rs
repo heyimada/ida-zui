@@ -5,6 +5,7 @@
 use super::*;
 use crate::theme::{code_font_name, hsla};
 use crate::ui::{self, icon, icon_button, tip};
+use crate::workspace::tabs::TabDrag;
 use gpui::{AnyElement, WindowControlArea};
 use std::time::Instant;
 
@@ -835,7 +836,13 @@ impl Workspace {
     }
 
     /// The editor tab strip: the main view's tab, then the editors opened in tabs.
-    pub fn tab_strip(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// The tab strip of a pane. Tabs drag to reorder and to the other pane.
+    pub fn tab_strip(
+        &self,
+        right: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let t = *theme;
         let s = self.session.read(cx);
         // The main view's own place (a pinned tab may have moved the session cursor).
@@ -852,15 +859,21 @@ impl Workspace {
             .or_else(|| s.file_name())
             .unwrap_or_default();
         let dirty = s.dirty;
-        let main_on = self.doc.is_none();
+        let front = if right { self.right_front } else { self.doc };
+        let main_on = !right && self.doc.is_none();
         let docs: Vec<(u64, SharedString)> = self
-            .docs
-            .iter()
-            .map(|d| match &d.view {
-                crate::docs::DocView::Code(cv) => (d.id, self.code_tab_title(cv, cx)),
-                _ => (d.id, d.title.clone()),
+            .strip(right)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| {
+                let d = self.docs.iter().find(|d| d.id == id)?;
+                Some(match &d.view {
+                    crate::docs::DocView::Code(cv) => (id, self.code_tab_title(cv, cx)),
+                    _ => (id, d.title.clone()),
+                })
             })
             .collect();
+        let first_left_doc = docs.first().map(|(id, _)| *id);
         let tab_base = |id: gpui::ElementId, on: bool| {
             let tb = div()
                 .id(id)
@@ -893,7 +906,9 @@ impl Workspace {
                 tb.hover(move |d| d.bg(hsla(t.hover)))
             }
         };
+        let two_panes = !self.right.is_empty();
         div()
+            .id(if right { "strip-right" } else { "strip-left" })
             .h(px(TAB_H))
             .flex_none()
             .flex()
@@ -901,21 +916,42 @@ impl Workspace {
             .bg(hsla(t.bg))
             .border_b_1()
             .border_color(hsla(t.border))
-            .child(
-                tab_base("tab-main".into(), main_on)
-                    .on_click(cx.listener(|w, _, window, cx| w.show_main(window, cx)))
-                    .child(icon(
-                        "view",
-                        16.,
-                        hsla(if main_on { t.accent } else { t.muted }),
-                    ))
-                    .child(main_title)
-                    .when(dirty, |d| d.child(ui::dot(8., t.warning))),
-            )
+            // Dropped on the empty part of the strip: the end of this pane.
+            .on_drop(cx.listener(move |w, d: &TabDrag, window, cx| {
+                w.move_tab(d.id, right, None, window, cx)
+            }))
+            .when(!right, |strip| {
+                strip.child(
+                    tab_base("tab-main".into(), main_on)
+                        .on_click(cx.listener(|w, _, window, cx| w.show_main(window, cx)))
+                        .on_drop(cx.listener(move |w, d: &TabDrag, window, cx| {
+                            // Right after the main view.
+                            w.move_tab(d.id, false, first_left_doc, window, cx)
+                        }))
+                        .child(icon(
+                            "view",
+                            16.,
+                            hsla(if main_on { t.accent } else { t.muted }),
+                        ))
+                        .child(main_title)
+                        .when(dirty, |d| d.child(ui::dot(8., t.warning))),
+                )
+            })
             .children(docs.into_iter().map(|(id, title)| {
-                let on = self.doc == Some(id);
+                let on = front == Some(id);
+                let drag_title = title.clone();
                 tab_base(("doc-tab", id).into(), on)
                     .on_click(cx.listener(move |w, _, window, cx| w.show_doc(id, window, cx)))
+                    .on_drag(
+                        TabDrag {
+                            id,
+                            title: drag_title,
+                        },
+                        |d, _, _, cx| cx.new(|_| d.clone()),
+                    )
+                    .on_drop(cx.listener(move |w, d: &TabDrag, window, cx| {
+                        w.move_tab(d.id, right, Some(id), window, cx)
+                    }))
                     .child(icon("view", 16., hsla(if on { t.accent } else { t.muted })))
                     .child(title)
                     .child(
@@ -934,6 +970,10 @@ impl Workspace {
                             .child(icon("close", 12., hsla(t.muted))),
                     )
             }))
+            .when(two_panes && right == self.focus_right, |d| {
+                // The pane with the keyboard.
+                d.border_t_2().border_color(hsla(t.accent))
+            })
     }
 
     /// `file › segment › function › address` with the block count on the right.
@@ -999,19 +1039,6 @@ impl Workspace {
                         .child("·  Hex-Rays decompiler"),
                 )
             })
-    }
-
-    /// A pane header for the split view.
-    pub fn pane_header(
-        &self,
-        title: &'static str,
-        note: String,
-        theme: &Theme,
-    ) -> impl IntoElement + use<> {
-        ui::panel_header(title, theme)
-            .pr(px(12.))
-            .child(div().flex_1())
-            .child(ui::mono_note(note, theme))
     }
 
     pub fn status_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {

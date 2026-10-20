@@ -33,8 +33,10 @@ mod loadlog;
 mod lumina;
 mod menubar;
 mod modal;
+mod nav_history;
 mod open_dialog;
 mod operands;
+mod panes;
 mod plugins;
 mod plugins_view;
 mod proximity_view;
@@ -120,6 +122,7 @@ fn main() {
                     ws
                 },
             );
+            let main_id = result.as_ref().ok().map(|h| h.window_id());
             match (result, automation) {
                 (Ok(handle), Some(channel)) => automation::start(channel, handle.into(), cx),
                 (Err(e), _) => {
@@ -128,8 +131,9 @@ fn main() {
                 }
                 _ => {}
             }
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
+            // The app ends with its main window (floating windows only dock back).
+            cx.on_window_closed(move |cx, _| {
+                if main_id.is_none_or(|id| !cx.windows().iter().any(|w| w.window_id() == id)) {
                     cx.quit();
                 }
             })

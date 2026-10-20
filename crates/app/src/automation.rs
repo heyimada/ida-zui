@@ -67,9 +67,28 @@ pub fn start(path: PathBuf, handle: AnyWindowHandle, cx: &mut App) {
             }
             if let Some(line) = pending.pop() {
                 let done_path = path.clone();
-                let ok = cx
-                    .update_window(handle, |_, window, cx| run(&line, &done_path, window, cx))
-                    .unwrap_or(false);
+                // `@<n> <command>` targets a floating window (1-based, in opening order).
+                let (target, line) = match line.strip_prefix('@').and_then(|l| l.split_once(' ')) {
+                    Some((n, rest)) if n.parse::<usize>().is_ok() => {
+                        let n: usize = n.parse().unwrap_or(0);
+                        let win = if n == 0 {
+                            Some(handle)
+                        } else {
+                            cx.update(|cx| {
+                                cx.try_global::<crate::workspace::FloatingWindows>()
+                                    .and_then(|f| f.0.get(n - 1).copied())
+                            })
+                        };
+                        (win, rest.to_owned())
+                    }
+                    _ => (Some(handle), line),
+                };
+                let ok = match target {
+                    Some(h) => cx
+                        .update_window(h, |_, window, cx| run(&line, &done_path, window, cx))
+                        .unwrap_or(false),
+                    None => false,
+                };
                 if !ok {
                     eprintln!("automation: could not run '{line}'");
                 }

@@ -24,6 +24,8 @@
 #   clipassert:<text>  like clipdump, then compare with <text> (write newlines as \n); a mismatch fails the script
 #   marker:<name>      wait until the app has executed everything queued so far
 #   shot:<name>        save the window as artifacts/ui/<name>.png
+#   win:<n>            aim the following key/type/action/mouse/shot steps at floating window n (1-based, in the
+#                      order they were opened); win:0 is the main window again
 #   close              post WM_CLOSE (no focus change), waitexit:<ms>, files:<glob>
 #   procs              list the ida-host.exe processes that are children of the app (their PIDs are remembered)
 #   hostsgone[:<ms>]   wait up to <ms> (default 20000) for the hosts remembered by `procs` to exit while the app is
@@ -77,7 +79,12 @@ $channel = Join-Path $work "automation.txt"
 Remove-Item "$channel.done" -ErrorAction SilentlyContinue
 $logLines = New-Object System.Collections.Generic.List[string]
 function Note($m) { Write-Output $m; $logLines.Add($m) }
-function Send($line) { [System.IO.File]::AppendAllText($channel, "$line`n", $utf8) }
+# `win:<n>` aims the commands below at floating window n (0 is the main window).
+$script:target = 0
+function Send($line) {
+    if ($script:target -gt 0 -and $line -notmatch '^(marker|clipdump|clipboard|drop|confirm)') { $line = "@$($script:target) $line" }
+    [System.IO.File]::AppendAllText($channel, "$line`n", $utf8)
+}
 
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
@@ -112,6 +119,19 @@ public static class Win {
       return true;
     }, IntPtr.Zero);
     return found;
+  }
+  // The visible top-level windows of the process other than `skip` (the floating windows), by handle, which grows with age.
+  public static IntPtr[] FindOtherWindows(uint pid, IntPtr skip) {
+    var list = new System.Collections.Generic.List<IntPtr>();
+    EnumWindows((h, p) => {
+      uint wp; GetWindowThreadProcessId(h, out wp);
+      if (wp != pid || !IsWindowVisible(h) || h == skip) return true;
+      var sb = new System.Text.StringBuilder(256); GetClassName(h, sb, 256);
+      if (sb.ToString() == "ConsoleWindowClass") return true;
+      list.Add(h); return true;
+    }, IntPtr.Zero);
+    list.Sort((a, b) => a.ToInt64().CompareTo(b.ToInt64()));
+    return list.ToArray();
   }
   public static IntPtr FindAppWindow(uint pid) {
     IntPtr found = IntPtr.Zero;
@@ -158,6 +178,7 @@ try {
         if ($proc.HasExited -and $kind -notin "hostsgone", "files", "procs") { Note "app exited before step '$step'"; break }
         switch ($kind) {
             "wait" { Start-Sleep -Milliseconds ([int]$arg) }
+            "win" { $script:target = [int]$arg }
             "key" { Send "key $arg" }
             "type" { Send "type $arg" }
             "action" { Send "action $arg" }
@@ -204,14 +225,21 @@ try {
             }
             { $_ -in "shot", "screen" } {
                 # PrintWindow renders the app's own content, wherever it sits in the z-order.
-                [Win]::SendToBottom($h)
+                # With `win:<n>` (n > 0) it is floating window n of the app, never the desktop.
+                $sh = $h
+                if ($script:target -gt 0) {
+                    $others = [Win]::FindOtherWindows([uint32]$proc.Id, $h)
+                    if ($others.Count -lt $script:target) { Note "FAIL shot: no floating window $($script:target)"; $failed = $true; break }
+                    $sh = $others[$script:target - 1]
+                }
+                [Win]::SendToBottom($sh)
                 Start-Sleep -Milliseconds 250
                 $r = New-Object Win+RECT
-                [Win]::GetClientRect($h, [ref]$r) | Out-Null
+                [Win]::GetClientRect($sh, [ref]$r) | Out-Null
                 $bmp = New-Object System.Drawing.Bitmap ($r.R - $r.L), ($r.B - $r.T)
                 $g = [System.Drawing.Graphics]::FromImage($bmp)
                 $hdc = $g.GetHdc()
-                [Win]::PrintWindow($h, $hdc, 3) | Out-Null   # PW_CLIENTONLY | PW_RENDERFULLCONTENT
+                [Win]::PrintWindow($sh, $hdc, 3) | Out-Null   # PW_CLIENTONLY | PW_RENDERFULLCONTENT
                 $g.ReleaseHdc($hdc)
                 $g.Dispose()
                 $file = Join-Path $out "$arg.png"

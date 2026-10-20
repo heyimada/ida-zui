@@ -242,6 +242,8 @@ pub struct Session {
     pub marks: Vec<ida_proto::MarkRow>,
     /// The view the user is working in (see `follows`); set by the workspace.
     pub driver: Option<Driver>,
+    /// Back / forward of each pinned view (by view id).
+    pub tab_history: std::collections::HashMap<u64, crate::nav_history::NavHistory>,
     /// Function and name lists, shared by the side panel and jump-anywhere.
     pub functions: Rc<Vec<ida_proto::FuncRow>>,
     pub names: Rc<Vec<ida_proto::NameRow>>,
@@ -284,6 +286,7 @@ impl Session {
             op_repr: Vec::new(),
             marks: Vec::new(),
             driver: None,
+            tab_history: Default::default(),
             functions: Rc::default(),
             names: Rc::default(),
             analysis: None,
@@ -703,6 +706,19 @@ impl Session {
 
     /// A user-initiated jump: recorded in history.
     pub fn navigate(&mut self, ea: Ea, cx: &mut Context<Self>) {
+        // A pinned view driving: the jump goes into its own history.
+        if let Some(d) = self.driver.filter(|d| d.pinned) {
+            let from = self.cursor;
+            self.tab_history
+                .entry(d.origin.view)
+                .or_insert_with(|| crate::nav_history::NavHistory::new(from))
+                .navigate(from, ea);
+            self.cursor = ea;
+            self.status.clear();
+            cx.emit(SessionEvent::Navigated { ea });
+            cx.notify();
+            return;
+        }
         if self.history.get(self.hist_pos) != Some(&self.cursor) {
             self.history.truncate(self.hist_pos + 1);
             self.history.push(self.cursor);
@@ -752,7 +768,28 @@ impl Session {
         }
     }
 
+    /// Moves within the pinned driver's own history; true when it has one.
+    fn step_tab_history(&mut self, back: bool, cx: &mut Context<Self>) -> bool {
+        let Some(d) = self.driver.filter(|d| d.pinned) else {
+            return false;
+        };
+        let cursor = self.cursor;
+        let h = self
+            .tab_history
+            .entry(d.origin.view)
+            .or_insert_with(|| crate::nav_history::NavHistory::new(cursor));
+        if let Some(ea) = if back { h.back() } else { h.forward() } {
+            self.cursor = ea;
+            cx.emit(SessionEvent::Navigated { ea });
+            cx.notify();
+        }
+        true
+    }
+
     pub fn back(&mut self, cx: &mut Context<Self>) {
+        if self.step_tab_history(true, cx) {
+            return;
+        }
         if self.hist_pos > 0 {
             self.hist_pos -= 1;
             let ea = self.history[self.hist_pos];
@@ -763,6 +800,9 @@ impl Session {
     }
 
     pub fn forward(&mut self, cx: &mut Context<Self>) {
+        if self.step_tab_history(false, cx) {
+            return;
+        }
         if self.hist_pos + 1 < self.history.len() {
             self.hist_pos += 1;
             let ea = self.history[self.hist_pos];

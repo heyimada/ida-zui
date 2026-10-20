@@ -4,7 +4,10 @@
 mod chrome;
 mod debug;
 mod edit;
+mod floating;
+pub use floating::FloatingWindows;
 mod tabs;
+use tabs as workspace_tabs;
 
 use crate::actions::*;
 use crate::bottom::{BottomEvent, BottomPanel, BottomTab};
@@ -108,6 +111,8 @@ pub struct Workspace {
     busy: bool,
     /// The listing columns last pushed to the open databases.
     applied_listing: (u32, u32),
+    /// Tabs are being reopened from settings (nothing is saved meanwhile).
+    restoring_tabs: bool,
     /// The loading screen shows IDA's log (collapsed by default).
     show_ida_output: bool,
     /// Run requests from open Plugins windows.
@@ -177,6 +182,7 @@ impl Workspace {
             close_confirmed: false,
             busy: false,
             applied_listing,
+            restoring_tabs: false,
             show_ida_output: false,
             plugin_run_subs: Vec::new(),
             focus: cx.focus_handle(),
@@ -242,9 +248,14 @@ impl Workspace {
             pseudo,
             mode: Mode::Linear,
             tab_back: None,
+            pending_tabs: false,
+            right: Vec::new(),
+            right_front: None,
+            focus_right: false,
             doc: None,
             docs: Vec::new(),
             next_doc: 1,
+            floating: Vec::new(),
             sidebar,
             focus_ctx,
             inspector,
@@ -292,7 +303,7 @@ impl Workspace {
                     .new(|cx| crate::edit_dialogs::CommentDialog::new(session, ea, rep, &text, cx));
                 self.show_dialog(dialog, window, cx);
             }
-            SessionEvent::ContextMenu(req) if active => {
+            SessionEvent::ContextMenu(req) if active && !floating::input_is_floating(cx) => {
                 let (pos, title, entries, keyboard) = (
                     req.pos,
                     req.title.clone(),
@@ -303,7 +314,7 @@ impl Workspace {
                     m.open_popup(pos, title, entries, keyboard, window, cx)
                 });
             }
-            SessionEvent::Prompt(req) if active => {
+            SessionEvent::Prompt(req) if active && !floating::input_is_floating(cx) => {
                 let req = req.clone();
                 self.open_modal(
                     req.title.clone(),
@@ -351,11 +362,24 @@ impl Workspace {
                     self.set_window_title(window, cx);
                 }
             }
-            SessionEvent::ListsReloaded => self.dbs[ix].goto_choices = None,
+            SessionEvent::ListsReloaded => {
+                self.dbs[ix].goto_choices = None;
+                if active && std::mem::take(&mut self.dbs[ix].pending_tabs) {
+                    if !self.restore_tabs(window, cx) && self.split {
+                        // The layout had a second pane: the pseudocode of the main view.
+                        let ea = self.session.read(cx).cursor;
+                        self.open_in_right(ViewKind::Pseudocode, ea, false, window, cx);
+                        self.focus_right = false;
+                    }
+                    Self::sync_db_views(&self.dbs[ix], self.split, cx);
+                }
+            }
             SessionEvent::Opened => {
                 self.load_plugins(ix, cx);
                 self.clear_docs(ix, window, cx);
                 self.record_recent(ix, cx);
+                // The tabs need the function list: they come back with it.
+                self.dbs[ix].pending_tabs = true;
                 Self::sync_db_views(&self.dbs[ix], self.split, cx);
                 if active {
                     self.set_window_title(window, cx);
@@ -390,7 +414,7 @@ impl Workspace {
         let inspector_tab = self.inspector.read(cx).tab.key().to_owned();
         let bottom_tab = self.bottom.read(cx).tab.key().to_owned();
         let (split, sidebar, inspector, bottom) = (
-            self.split,
+            !self.right.is_empty(),
             self.show_sidebar,
             self.show_inspector,
             self.show_bottom,
@@ -450,7 +474,7 @@ impl Workspace {
             sidebar: self.show_sidebar,
             inspector: self.show_inspector,
             bottom: self.show_bottom,
-            split: self.split,
+            split: !self.right.is_empty(),
             hide_casts: self.pseudo.read(cx).hide_casts(),
             debug_active: dbg.active(),
             debug_suspended: dbg.suspended(),
@@ -463,9 +487,9 @@ impl Workspace {
         Self::sync_db_views(&self.dbs[self.active], self.split, cx);
     }
 
-    fn sync_db_views(db: &Database, split: bool, cx: &mut Context<Self>) {
+    fn sync_db_views(db: &Database, _split: bool, cx: &mut Context<Self>) {
         let main = db.doc.is_none();
-        let pseudo = main && (split || db.mode == Mode::Pseudo);
+        let pseudo = main && db.mode == Mode::Pseudo;
         let graph = main && db.mode == Mode::Graph;
         let hex = main && db.mode == Mode::Hex;
         db.pseudo.update(cx, |p, cx| p.set_visible(pseudo, cx));
@@ -497,13 +521,20 @@ impl Workspace {
     /// Brings the main view forward (the first tab).
     fn show_main(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.doc = None;
+        self.focus_right = false;
         self.sync_views(cx);
         self.focus_main(window, cx);
         cx.notify();
     }
 
     fn show_doc(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        self.doc = Some(id);
+        if self.right.contains(&id) {
+            self.right_front = Some(id);
+            self.focus_right = true;
+        } else {
+            self.doc = Some(id);
+            self.focus_right = false;
+        }
         self.sync_views(cx);
         if let Some(d) = self.docs.iter().find(|d| d.id == id) {
             window.focus(&d.view.focus_handle(cx), cx);
@@ -511,18 +542,20 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The toolbar and View menu toggle: a second pane with the pseudocode
+    /// of what the left pane shows, or back to one pane.
     fn toggle_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.split = !self.split;
-        self.doc = None;
-        self.sync_views(cx);
-        self.focus_main(window, cx);
-        self.save_layout(cx);
-        cx.notify();
+        if self.right.is_empty() {
+            let ea = self.session.read(cx).cursor;
+            self.open_in_right(ViewKind::Pseudocode, ea, false, window, cx);
+        } else {
+            self.close_right_pane(window, cx);
+        }
     }
 
     /// The view that has the keyboard for the current mode: the primary pane.
     fn main_focus(&self, cx: &App) -> FocusHandle {
-        if let Some(id) = self.doc
+        if let Some(id) = self.focused_front()
             && let Some(d) = self.docs.iter().find(|d| d.id == id)
         {
             return d.view.focus_handle(cx);
@@ -544,33 +577,17 @@ impl Workspace {
     /// show pseudocode in the main view and return to the previous view. The
     /// layout is not persisted: only the split toggle does that.
     fn toggle_pseudo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.right.is_empty() {
+            // Two panes: the key moves the focus to the other one.
+            self.focus_other_pane(window, cx);
+            return;
+        }
         if self.doc.is_some() {
             return;
         }
-        if !self.split {
-            let (mode, back) = crate::database::tab_toggle(self.mode, self.tab_back);
-            self.set_mode(mode, window, cx);
-            self.tab_back = back;
-            return;
-        }
-        let pseudo_focused = self
-            .pseudo
-            .read(cx)
-            .focus_handle(cx)
-            .contains_focused(window, cx);
-        if pseudo_focused {
-            // The other pane of the split: the listing when pseudocode is the main view.
-            let f = if self.mode == Mode::Pseudo {
-                self.listing.read(cx).focus_handle(cx)
-            } else {
-                self.main_focus(cx)
-            };
-            window.focus(&f, cx);
-        } else {
-            self.pseudo
-                .update(cx, |p, cx| window.focus(&p.focus_handle(cx), cx));
-        }
-        cx.notify();
+        let (mode, back) = crate::database::tab_toggle(self.mode, self.tab_back);
+        self.set_mode(mode, window, cx);
+        self.tab_back = back;
     }
 
     // ---- databases -----------------------------------------------------------
@@ -1167,31 +1184,59 @@ impl Workspace {
     }
 
     fn close_doc(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(at) = self.docs.iter().position(|d| d.id == id) else {
-            return;
+        self.remove_doc(id, window, cx);
+    }
+
+    /// Takes a tab out of the strip; the neighbour comes forward.
+    fn remove_doc(
+        &mut self,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<DocTab> {
+        let at = self.docs.iter().position(|d| d.id == id)?;
+        let was_right = self.right.contains(&id);
+        let strip = self.strip(was_right);
+        let removed = self.docs.remove(at);
+        self.right.retain(|&t| t != id);
+        let front_was_closed = if was_right {
+            self.right_front == Some(id)
+        } else {
+            self.doc == Some(id)
         };
-        self.docs.remove(at);
-        if self.doc == Some(id) {
-            // Fall back to the neighbouring editor tab, else the main view.
-            match at
-                .checked_sub(1)
-                .and_then(|i| self.docs.get(i))
-                .map(|d| d.id)
-            {
-                Some(prev) => self.show_doc(prev, window, cx),
-                None => self.show_main(window, cx),
+        if front_was_closed {
+            // The neighbouring tab of the same pane comes forward.
+            match crate::panes::after_close(&strip, id) {
+                Some(Some(next)) => self.show_doc(next, window, cx),
+                Some(None) => self.show_main(window, cx),
+                None => {
+                    self.right_front = None;
+                    self.show_main(window, cx)
+                }
             }
         }
+        if self.right.is_empty() {
+            self.right_front = None;
+            self.focus_right = false;
+        }
+        self.sync_views(cx);
+        self.tabs_changed(cx);
         cx.notify();
+        Some(removed)
     }
 
     /// Drops the editor tabs of database `ix` (its database closed or reopened).
     fn clear_docs(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let db = &mut self.dbs[ix];
-        if db.docs.is_empty() {
+        if db.docs.is_empty() && db.floating.is_empty() {
             return;
         }
         db.docs.clear();
+        self.close_floating(ix, cx);
+        let db = &mut self.dbs[ix];
+        db.right.clear();
+        db.right_front = None;
+        db.focus_right = false;
         let was_front = db.doc.take().is_some();
         if was_front && ix == self.active {
             self.show_main(window, cx);
@@ -1270,6 +1315,7 @@ impl Workspace {
             .session
             .update(cx, |s, cx| s.close(save, cx))
             .detach();
+        self.close_floating(ix, cx);
         self.dbs.remove(ix);
         if self.dbs.is_empty() {
             let id = self.next_db;
@@ -2241,7 +2287,6 @@ impl Workspace {
         self.show_sidebar = d.sidebar;
         self.show_inspector = d.inspector;
         self.show_bottom = d.bottom;
-        self.split = d.split;
         self.sidebar_w = d.sidebar_w;
         self.inspector_w = d.inspector_w;
         self.bottom_h = d.bottom_h;
@@ -2259,90 +2304,90 @@ impl Workspace {
 
     // ---- rendering the main area ------------------------------------------
 
-    /// The pane in the editor area for `mode`, with a header when split.
-    fn pane(&self, mode: Mode, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let t = Theme::get(cx);
-        let s = self.session.read(cx);
-        let cursor = s.cursor;
-        let segment = self
-            .focus_ctx
-            .read(cx)
-            .addr
-            .as_ref()
-            .and_then(|a| a.segment.clone())
-            .unwrap_or_default();
-        let (title, note, view): (&'static str, String, gpui::AnyElement) = match mode {
-            Mode::Linear => (
-                "Linear",
-                format!("{segment}  0x{cursor:x}"),
-                self.listing.clone().into_any_element(),
-            ),
-            Mode::Graph => (
-                "Graph",
-                format!("{segment}  0x{cursor:x}"),
-                self.graph.clone().into_any_element(),
-            ),
-            Mode::Hex => (
-                "Hex",
-                format!("{segment}  0x{cursor:x}"),
-                self.hex.clone().into_any_element(),
-            ),
-            Mode::Pseudo => {
-                let line = s.caret.line.filter(|_| {
-                    s.caret
-                        .origin
-                        .is_some_and(|o| o.kind == crate::session::ViewKind::Pseudocode)
-                });
-                let note = match line {
-                    Some(l) => format!("Hex-Rays  ·  line {l}"),
-                    None => "Hex-Rays".to_owned(),
-                };
-                ("Pseudocode", note, self.pseudo.clone().into_any_element())
-            }
+    /// The main view for `mode`.
+    fn pane(&self, mode: Mode) -> gpui::AnyElement {
+        let view: gpui::AnyElement = match mode {
+            Mode::Linear => self.listing.clone().into_any_element(),
+            Mode::Graph => self.graph.clone().into_any_element(),
+            Mode::Hex => self.hex.clone().into_any_element(),
+            Mode::Pseudo => self.pseudo.clone().into_any_element(),
         };
-        let header = self.split.then(|| self.pane_header(title, note, &t));
         div()
             .flex_1()
             .min_w_0()
             .h_full()
             .flex()
             .flex_col()
-            .children(header)
             .child(div().flex_1().min_h_0().child(view))
             .into_any_element()
     }
 
-    fn editor_area(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let t = *theme;
-        if let Some(id) = self.doc
+    /// What a pane shows: the tab in front, or the main view.
+    fn pane_content(&self, front: Option<u64>) -> gpui::AnyElement {
+        if let Some(id) = front
             && let Some(d) = self.docs.iter().find(|d| d.id == id)
         {
             return div()
                 .flex_1()
                 .min_h_0()
+                .min_w_0()
                 .child(d.view.any())
                 .into_any_element();
         }
-        let panes: Vec<gpui::AnyElement> = if !self.split {
-            vec![self.pane(self.mode, cx)]
-        } else if self.mode == Mode::Pseudo {
-            vec![self.pane(Mode::Linear, cx), self.pane(Mode::Pseudo, cx)]
-        } else {
-            vec![self.pane(self.mode, cx), self.pane(Mode::Pseudo, cx)]
+        div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .child(self.pane(self.mode))
+            .into_any_element()
+    }
+
+    /// The tab strips and what they show: one pane, or two side by side.
+    fn panes_area(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = *theme;
+        let column = |right: bool, w: &Self, cx: &mut Context<Self>| {
+            let front = if right { w.right_front } else { w.doc };
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_col()
+                .when(right, |d| d.border_l_1().border_color(hsla(t.border)))
+                .child(w.tab_strip(right, &t, cx))
+                .when(!right && w.doc.is_none(), |d| d.child(w.jump_bar(&t, cx)))
+                .child(w.pane_content(front))
+                // A click in a pane gives it the keyboard.
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |w, _, _, cx| {
+                        if w.focus_right != right && !w.right.is_empty() {
+                            w.focus_right = right;
+                            w.sync_views(cx);
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_drop(
+                    cx.listener(move |w, d: &workspace_tabs::TabDrag, window, cx| {
+                        w.move_tab(d.id, right, None, window, cx)
+                    }),
+                )
         };
+        if self.right.is_empty() {
+            return div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .child(column(false, self, cx))
+                .into_any_element();
+        }
         div()
             .flex_1()
             .min_h_0()
             .flex()
-            .children(panes.into_iter().enumerate().map(|(i, p)| {
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .when(i > 0, |d| d.border_l_1().border_color(hsla(t.border)))
-                    .child(p)
-            }))
+            .child(column(false, self, cx))
+            .child(column(true, self, cx))
             .into_any_element()
     }
 
@@ -2372,9 +2417,7 @@ impl Workspace {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .child(self.tab_strip(&t, cx))
-                    .when(self.doc.is_none(), |d| d.child(self.jump_bar(&t, cx)))
-                    .child(self.editor_area(&t, cx))
+                    .child(self.panes_area(&t, cx))
                     .when(self.show_bottom, |d| {
                         d.child(
                             div()
@@ -2712,7 +2755,7 @@ impl Render for Workspace {
                 w.lumina(LuminaAction::PushFunc, window, cx)
             }))
             .on_action(cx.listener(|w, _: &CloseTab, window, cx| {
-                if let Some(id) = w.doc {
+                if let Some(id) = w.focused_front() {
                     w.close_doc(id, window, cx);
                 }
             }))
@@ -2817,6 +2860,14 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &NewPseudoTab, window, cx| {
                 w.new_tab_here(ViewKind::Pseudocode, window, cx)
             }))
+            .on_action(
+                cx.listener(|w, _: &MoveToNewWindow, window, cx| w.move_to_new_window(window, cx)),
+            )
+            .on_action(
+                cx.listener(|w, _: &MoveToOtherPane, window, cx| w.move_to_other_pane(window, cx)),
+            )
+            .on_action(cx.listener(|w, _: &NextTab, window, cx| w.cycle_tab(1, window, cx)))
+            .on_action(cx.listener(|w, _: &PrevTab, window, cx| w.cycle_tab(-1, window, cx)))
             .on_action(cx.listener(|w, _: &OpenInNewTab, window, cx| {
                 let kind = w.active_kind().unwrap_or(ViewKind::Listing);
                 w.new_tab_here(kind, window, cx)

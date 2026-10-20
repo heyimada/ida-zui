@@ -34,6 +34,13 @@ pub struct DocTab {
     pub _sub: Subscription,
 }
 
+/// A code view torn off into a window of its own.
+pub struct Floating {
+    pub id: u64,
+    pub view: crate::docs::CodeView,
+    pub window: gpui::AnyWindowHandle,
+}
+
 /// How a database tab looks in the strip.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TabKind {
@@ -57,7 +64,17 @@ pub struct Database {
     /// The editor tab in front, when it is not the main view.
     pub doc: Option<u64>,
     pub docs: Vec<DocTab>,
+    /// Saved tabs are reopened once the function list has arrived.
+    pub pending_tabs: bool,
+    /// Ids of the tabs shown in the right pane (never the main view).
+    pub right: Vec<u64>,
+    /// The tab in front in the right pane.
+    pub right_front: Option<u64>,
+    /// The keyboard is in the right pane.
+    pub focus_right: bool,
     pub next_doc: u64,
+    /// Views in windows of their own.
+    pub floating: Vec<Floating>,
     pub sidebar: Entity<Sidebar>,
     pub focus_ctx: Entity<Focus>,
     pub inspector: Entity<Inspector>,

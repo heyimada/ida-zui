@@ -158,6 +158,31 @@ pub struct Settings {
     pub segments_open: bool,
     /// Bytes per group in the hex view: 1, 2, 4 or 8.
     pub hex_group: u64,
+    /// The code tabs and panes of each database, by its input file.
+    pub saved_tabs: BTreeMap<String, SavedTabs>,
+}
+
+/// One open code tab, as stored.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SavedTab {
+    /// `listing`, `graph`, `hex` or `pseudo`.
+    pub kind: String,
+    pub ea: u64,
+    pub pinned: bool,
+    /// In the right pane.
+    pub right: bool,
+}
+
+/// The code tabs of a database and which are in front.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SavedTabs {
+    pub tabs: Vec<SavedTab>,
+    /// Index into `tabs` of the tab in front in each pane (`None`: the main view / none).
+    pub left_front: Option<usize>,
+    pub right_front: Option<usize>,
+    pub focus_right: bool,
 }
 
 impl Default for Settings {
@@ -182,6 +207,7 @@ impl Default for Settings {
             side_tables: BTreeMap::new(),
             segments_open: true,
             hex_group: 8,
+            saved_tabs: BTreeMap::new(),
         }
     }
 }

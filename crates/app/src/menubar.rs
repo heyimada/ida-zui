@@ -488,6 +488,8 @@ pub fn build(
                 c!(ShowPseudocode, "Pseudocode"),
                 c!(TogglePseudocode, "Switch to pseudocode pane"),
                 toggle(c!(ToggleSplit, "Split with pseudocode"), view.split),
+                c!(MoveToOtherPane, "Split right / move tab to the other pane"),
+                c!(MoveToNewWindow, "Move tab to a new window"),
                 toggle(c!(ToggleHideCasts, "Hide casts"), view.hide_casts),
                 Entry::Sub {
                     label: "New tab".into(),
@@ -674,6 +676,8 @@ pub struct MenuBar {
     /// A context menu: the same dropdown machinery, opened at a window
     /// position instead of under a title.
     popup: Option<Popup>,
+    /// Only context menus: no menu titles are drawn (a floating window).
+    pub popup_only: bool,
     /// The caret's operand, for the check marks of Edit > Operand.
     pub ops: crate::operands::Ops,
     _sub: Subscription,
@@ -715,6 +719,7 @@ impl MenuBar {
             focus,
             return_focus: None,
             popup: None,
+            popup_only: false,
             ops: Default::default(),
             _sub: sub,
         }
@@ -1282,7 +1287,7 @@ impl Render for MenuBar {
             .on_key_down(
                 cx.listener(|m, ev: &KeyDownEvent, window, cx| m.on_letter(ev, window, cx)),
             )
-            .children(titles)
+            .when(!self.popup_only, |d| d.children(titles))
             .children(popup)
     }
 }
