@@ -298,6 +298,7 @@ impl SettingsView {
                     s.code_font = d.code_font;
                     s.code_font_size = d.code_font_size;
                     s.ui_font_size = d.ui_font_size;
+                    s.compact_rows = d.compact_rows;
                 });
                 let family = settings::get(cx).code_font.clone();
                 self.font.update(cx, |i, cx| i.set_value(&family, cx));
@@ -453,6 +454,23 @@ impl SettingsView {
                     cx,
                 )
                 .into_any_element(),
+            ))
+            .child(row(
+                "Row density",
+                ui::segmented_track(&t)
+                    .children([false, true].map(|compact| {
+                        ui::segment(
+                            ("density", compact as usize),
+                            if compact { "Compact" } else { "Comfortable" },
+                            s.compact_rows == compact,
+                            &t,
+                        )
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            settings::update(cx, |s| s.compact_rows = compact);
+                            cx.notify();
+                        }))
+                    }))
+                    .into_any_element(),
             ))
             .child(row(
                 "Preview",

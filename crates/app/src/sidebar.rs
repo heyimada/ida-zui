@@ -91,6 +91,8 @@ struct Item {
     badge: Option<(SharedString, u8)>,
     /// Local types: the editor this opens.
     doc: Option<DocKey>,
+    /// The mangled name when `label` is its demangled form (tooltip; also filterable).
+    mangled: Option<SharedString>,
 }
 
 impl Item {
@@ -109,7 +111,21 @@ impl Item {
             ea,
             badge: None,
             doc: None,
+            mangled: None,
         }
+    }
+
+    /// Shows `short` (when there is one) and keeps `name` as the tooltip and
+    /// the filter key.
+    fn demangled(name: String, short: String, detail: String, ea: Ea) -> Self {
+        if short.is_empty() || short == name {
+            return Self::new(name, detail, Some(ea));
+        }
+        let mut it = Self::new(short, detail, Some(ea));
+        it.key.push(' ');
+        it.key.push_str(&name.to_lowercase());
+        it.mangled = Some(name.into());
+        it
     }
 }
 
@@ -319,7 +335,8 @@ impl Sidebar {
                     f.await.map_err(|e| e.to_string()).map(|v| {
                         v.into_iter()
                             .map(|r| {
-                                let mut it = Item::new(r.name, format!("{:X}", r.ea), Some(r.ea));
+                                let mut it =
+                                    Item::demangled(r.name, r.short, format!("{:X}", r.ea), r.ea);
                                 it.badge = Some((r.module.to_lowercase().into(), 1));
                                 it.key.push(' ');
                                 it.key
@@ -335,7 +352,7 @@ impl Sidebar {
                 Box::pin(async move {
                     f.await.map_err(|e| e.to_string()).map(|v| {
                         v.into_iter()
-                            .map(|r| Item::new(r.name, format!("{:X}", r.ea), Some(r.ea)))
+                            .map(|r| Item::demangled(r.name, r.short, format!("{:X}", r.ea), r.ea))
                             .collect()
                     })
                 })
@@ -495,6 +512,7 @@ impl Render for Sidebar {
                                 .font_weight(gpui::FontWeight::MEDIUM)
                         })
                         .when(!on, |d| d.hover(|d| d.bg(hsla(theme.hover))))
+                        .when_some(it.mangled.clone(), |d, m| d.tooltip(ui::tip(m, None)))
                         .on_click(move |ev, _, cx| {
                             entity.update(cx, |v, cx| {
                                 // Types open an editor: that takes a double click.

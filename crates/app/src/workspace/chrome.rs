@@ -6,6 +6,7 @@ use super::*;
 use crate::theme::{code_font_name, hsla};
 use crate::ui::{self, icon, icon_button, tip};
 use gpui::{AnyElement, WindowControlArea};
+use std::time::Instant;
 
 pub const TITLE_H: f32 = 32.;
 pub const TOOLBAR_H: f32 = 44.;
@@ -126,17 +127,7 @@ impl Workspace {
                 })
                 .child(icon(name, 16., hsla(t.muted)))
         };
-        let glyph = div()
-            .size(px(16.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(4.))
-            .bg(hsla(t.accent))
-            .text_color(hsla(t.on_accent))
-            .text_size(px(11.))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .child("Z");
+        let glyph = ui::logo(16., &t);
         let left: AnyElement = if chips.is_empty() {
             div()
                 .id("window-drag")
@@ -708,6 +699,11 @@ impl Workspace {
                 .text_size(px(12.))
                 .text_color(hsla(t.faint))
                 .cursor_pointer()
+                // A launcher, not a second input: it opens the same jump modal as `G`.
+                .tooltip(ui::tip(
+                    "Jump to address or name",
+                    Some(crate::actions::shortcut_text(&GoTo, cx)),
+                ))
                 .on_click(cx.listener(|w, _, window, cx| w.goto(window, cx)))
                 .child(icon("search", 16., hsla(t.faint)))
                 .child(div().flex_1().child("Jump to address or name"))
@@ -1001,7 +997,7 @@ impl Workspace {
         let func = s
             .function_at(cursor)
             .map(|f| format!("{}+{:X}", short_name(&f.name), cursor - f.start));
-        let status = s.status.clone();
+        let status = s.status.get(Instant::now());
         let dirty = s.dirty;
         let caret = s.caret.clone();
         let info = s.info.clone();
@@ -1039,10 +1035,12 @@ impl Workspace {
             };
             (dot, text)
         });
+        // Only views with stable lines have a position worth showing; the
+        // listing and hex view have none.
         let place = match (caret.block, caret.line) {
-            (Some(b), Some(l)) => format!("Block #{b}, line {l}"),
-            (None, Some(l)) => format!("Line {l}, Col {}", caret.col),
-            _ => format!("Col {}", caret.col.max(1)),
+            (Some(b), Some(l)) => Some(format!("Block #{b}, line {l}")),
+            (None, Some(l)) => Some(format!("Line {l}, Col {}", caret.col)),
+            _ => None,
         };
         let bar = div()
             .h(px(STATUS_H))
@@ -1125,7 +1123,7 @@ impl Workspace {
                     .child(msg),
             )
         })
-        .child(div().child(place))
+        .when_some(place, |d, place| d.child(div().child(place)))
         .child(match analysis {
             Some(a) => div()
                 .flex()
@@ -1146,13 +1144,7 @@ impl Workspace {
                 .child(ui::spinner("status-spin", 12., hsla(t.accent)))
                 .child("Analyzing")
                 .into_any_element(),
-            None => div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(ui::dot(6., t.success))
-                .child("Analysis idle")
-                .into_any_element(),
+            None => div().into_any_element(),
         })
         .when_some(info, |d, i| {
             d.child(div().child(format!(
@@ -1228,17 +1220,7 @@ impl Workspace {
                                     .items_center()
                                     .gap(px(12.))
                                     .child(
-                                        div()
-                                            .size(px(32.))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(px(8.))
-                                            .bg(hsla(t.accent))
-                                            .text_color(hsla(t.on_accent))
-                                            .text_size(px(18.))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .child("Z"),
+                                        ui::logo(32., &t),
                                     )
                                     .child(div().text_size(px(20.)).line_height(px(28.)).font_weight(gpui::FontWeight::MEDIUM).child("ida-zui")),
                             )
@@ -1398,6 +1380,8 @@ impl Workspace {
             .clone()
             .filter(|_| settings::get(cx).show_analysis_progress);
         let tail: Vec<SharedString> = session.log.iter().rev().take(14).rev().cloned().collect();
+        let plugin_note = crate::loadlog::plugin_summary(&session.log);
+        let show_output = self.show_ida_output;
         let elapsed = format!("{}:{:02} elapsed", secs / 60, secs % 60);
         // Progress bar: `raised` track, `accent` fill, 6 px.
         let bar = |pct: u32| {
@@ -1484,25 +1468,56 @@ impl Workspace {
                     )
                     .into_any_element(),
             })
+            .when_some(plugin_note, |d, note| {
+                d.child(
+                    div()
+                        .mt(px(4.))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_size(px(11.))
+                        .text_color(hsla(t.muted))
+                        .child(icon("info", 14., hsla(t.muted)))
+                        .child(note),
+                )
+            })
             .child(
-                div()
-                    .w(px(760.))
-                    .h(px(280.))
-                    .mt(px(12.))
-                    .p(px(12.))
-                    .rounded(px(6.))
-                    .bg(hsla(t.surface2))
-                    .border_1()
-                    .border_color(hsla(t.border))
-                    .overflow_hidden()
-                    .font_family(code_font_name())
-                    .text_size(px(12.))
-                    .text_color(hsla(t.muted))
-                    .flex()
-                    .flex_col()
-                    .justify_end()
-                    .children(tail.into_iter().map(|l| div().whitespace_nowrap().child(l))),
+                ui::button(
+                    "ida-output-toggle",
+                    if show_output {
+                        "Hide IDA output"
+                    } else {
+                        "Show IDA output"
+                    },
+                    ui::ButtonKind::Ghost,
+                    true,
+                    &t,
+                )
+                .on_click(cx.listener(|w, _, _, cx| {
+                    w.show_ida_output = !w.show_ida_output;
+                    cx.notify();
+                })),
             )
+            .when(show_output, |d| {
+                d.child(
+                    div()
+                        .w(px(760.))
+                        .h(px(280.))
+                        .p(px(12.))
+                        .rounded(px(6.))
+                        .bg(hsla(t.surface2))
+                        .border_1()
+                        .border_color(hsla(t.border))
+                        .overflow_hidden()
+                        .font_family(code_font_name())
+                        .text_size(px(12.))
+                        .text_color(hsla(t.muted))
+                        .flex()
+                        .flex_col()
+                        .justify_end()
+                        .children(tail.into_iter().map(|l| div().whitespace_nowrap().child(l))),
+                )
+            })
             .into_any_element()
     }
 

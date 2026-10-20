@@ -24,6 +24,8 @@ const HEAD: f32 = 24.;
 const MIN_ZOOM: f32 = 0.03;
 /// Below this zoom blocks are drawn as plain boxes: the text would be unreadable.
 const TEXT_ZOOM: f32 = 0.3;
+/// Canvases narrower than this hide the minimap.
+const MINIMAP_MIN_W: f32 = 600.;
 /// Height of the strip with the zoom controls and the edge legend.
 const HEADER_H: f32 = 32.;
 
@@ -864,7 +866,8 @@ impl GraphView {
                         }
                     }
                     // Minimap: the blocks at a glance and the part in view.
-                    let minimap = if show_minimap {
+                    // A narrow pane (the split) would put it over the code.
+                    let minimap = if show_minimap && bounds.size.width >= px(MINIMAP_MIN_W) {
                         graph_paint::minimap(window, bounds, &theme, &layout, pan, zoom)
                     } else {
                         None
@@ -895,14 +898,6 @@ impl GraphView {
     fn render_header(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = *theme;
         let pct = format!("{:.0}%", self.zoom * 100.);
-        let swatch = |color: u32, label: &'static str| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(div().w(px(16.)).h(px(2.)).rounded(px(1.)).bg(hsla(color)))
-                .child(label)
-        };
         div()
             .h(px(HEADER_H))
             .flex_none()
@@ -950,14 +945,16 @@ impl GraphView {
             .child(div().flex_1())
             .child(
                 div()
+                    .id("edge-legend")
+                    .size(px(24.))
                     .flex()
                     .items_center()
-                    .gap(px(16.))
-                    .text_size(px(11.))
-                    .text_color(hsla(t.muted))
-                    .child(swatch(t.success, "Taken"))
-                    .child(swatch(t.danger, "Not taken"))
-                    .child(swatch(t.accent, "Unconditional")),
+                    .justify_center()
+                    .child(ui::icon("info", 16., hsla(t.muted)))
+                    .tooltip(ui::tip(
+                        "Edges: green = taken, red = not taken, blue = unconditional",
+                        None,
+                    )),
             )
             .child(div().flex_1())
             .child(

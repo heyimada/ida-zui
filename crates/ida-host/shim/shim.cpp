@@ -19,6 +19,7 @@
 #include <loader.hpp>
 #include <nalt.hpp>
 #include <name.hpp>
+#include <demangle.hpp>
 #include <search.hpp>
 #include <segment.hpp>
 #include <strlist.hpp>
@@ -41,6 +42,15 @@ std::string short_name(ea_t ea)
   if ( q.empty() )
     q = get_name(ea);
   return qs(q);
+}
+
+// The short demangled form of `name`, or empty when it is not a mangled name.
+static std::string demangled_short(const char *name)
+{
+  qstring out;
+  if ( name == nullptr || demangle_name(&out, name, MNG_SHORT_FORM) < 0 )
+    return std::string();
+  return qs(out);
 }
 
 static std::string seg_prefix(ea_t ea)
@@ -429,6 +439,7 @@ static int idaapi import_cb(ea_t ea, const char *name, uval_t ord, void *param)
     .kv("ea", (uint64_t)ea)
     .kv("module", qs(*ctx->module))
     .kv("name", qs(nm))
+    .kv("short", demangled_short(nm.c_str()))
     .kv("ordinal", (uint64_t)ord)
     .end_obj();
   return 1;
@@ -466,7 +477,7 @@ int izs_exports(void)
     ea_t ea = get_entry(ord);
     qstring name;
     get_entry_name(&name, ord);
-    j.obj().kv("ea", (uint64_t)ea).kv("ordinal", (uint64_t)ord).kv("name", qs(name)).end_obj();
+    j.obj().kv("ea", (uint64_t)ea).kv("ordinal", (uint64_t)ord).kv("name", qs(name)).kv("short", demangled_short(name.c_str())).end_obj();
   }
   j.end_arr();
   return ok(j);

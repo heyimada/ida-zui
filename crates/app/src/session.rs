@@ -3,6 +3,7 @@
 use crate::debugger::DebugModel;
 use crate::open_dialog::{Loader, OpenRequest, PROCESSORS};
 use crate::settings;
+use crate::status::{STATUS_TTL, StatusLine};
 use futures::StreamExt;
 use gpui::{App, Context, EventEmitter, SharedString, Task};
 use ida_proto::client::HostConfig;
@@ -117,7 +118,7 @@ pub struct Session {
     pub request: Option<OpenRequest>,
     pub revision: u64,
     pub log: Vec<SharedString>,
-    pub status: Option<(SharedString, bool)>,
+    pub status: StatusLine,
     /// Function and name lists, shared by the side panel and jump-anywhere.
     pub functions: Rc<Vec<ida_proto::FuncRow>>,
     pub names: Rc<Vec<ida_proto::NameRow>>,
@@ -156,7 +157,7 @@ impl Session {
             request: None,
             revision: 0,
             log: Vec::new(),
-            status: None,
+            status: StatusLine::default(),
             functions: Rc::default(),
             names: Rc::default(),
             analysis: None,
@@ -305,7 +306,7 @@ impl Session {
         self.history.clear();
         self.hist_pos = 0;
         self.log.clear();
-        self.status = None;
+        self.status.clear();
         self.phase = Phase::Loading {
             path: path.clone(),
             started: Instant::now(),
@@ -509,13 +510,38 @@ impl Session {
     pub fn error(&mut self, msg: impl Into<SharedString>, cx: &mut Context<Self>) {
         let msg = msg.into();
         self.log.push(format!("error: {msg}").into());
-        self.status = Some((msg, true));
-        cx.notify();
+        self.set_status(msg, true, cx);
     }
 
     pub fn info_msg(&mut self, msg: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.status = Some((msg.into(), false));
+        self.set_status(msg.into(), false, cx);
+    }
+
+    /// Shows `msg` in the status bar until the TTL passes or a command runs.
+    pub fn set_status(&mut self, msg: SharedString, error: bool, cx: &mut Context<Self>) {
+        self.status.set(msg, error, Instant::now());
         cx.notify();
+        cx.spawn(async move |this, cx| {
+            // A little late: a timer that fires early would find the message still live.
+            cx.background_executor()
+                .timer(STATUS_TTL + Duration::from_millis(200))
+                .await;
+            this.update(cx, |s, cx| {
+                if s.status.expire(Instant::now()) {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The next command: the previous message has been read.
+    pub fn clear_status(&mut self, cx: &mut Context<Self>) {
+        if self.status.get(Instant::now()).is_some() {
+            self.status.clear();
+            cx.notify();
+        }
     }
 
     /// A user-initiated jump: recorded in history.
@@ -531,7 +557,7 @@ impl Session {
         }
         self.hist_pos = self.history.len() - 1;
         self.cursor = ea;
-        self.status = None;
+        self.status.clear();
         cx.emit(SessionEvent::Navigated { ea });
         cx.notify();
     }

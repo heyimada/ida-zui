@@ -144,6 +144,23 @@ pub fn xref_badge(kind: &str, theme: &Theme) -> gpui::Div {
     )
 }
 
+/// The product mark ("iz" from ida-zui) on an accent tile; the title strip and
+/// the welcome page share it.
+pub fn logo(size: f32, theme: &Theme) -> gpui::Div {
+    div()
+        .size(px(size))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(size / 4.))
+        .bg(hsla(theme.accent))
+        .text_color(hsla(theme.on_accent))
+        .text_size(px(size * 0.56))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .child("iz")
+}
+
 /// A keyboard key cap: 11 px mono on `raised`.
 pub fn key_cap(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
     div()

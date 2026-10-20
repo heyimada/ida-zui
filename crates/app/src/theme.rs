@@ -5,7 +5,7 @@
 use gpui::{App, Global, Hsla, SharedString, rgb, rgba};
 use ida_proto::tags::color as c;
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Every colour is `0xRRGGBB`, except `scrim` and `shadow` (`0xRRGGBBAA`).
 #[derive(Clone, Copy, Debug)]
@@ -96,9 +96,9 @@ impl Theme {
         on_accent: 0x06101f,
         accent_soft: 0x2a3d58,
         ring: 0x6fb0ff,
-        selection: 0x2f4a72,
+        selection: 0x273e60,
         caret_row: 0x2d3038,
-        hl: 0x4f4420,
+        hl: 0x453b1b,
         danger: 0xff8c85,
         danger_soft: 0x42262b,
         success: 0x62c48e,
@@ -156,7 +156,7 @@ impl Theme {
             reg: 0x9b4a08,
             num: 0x7529a0,
             str: 0x17683a,
-            cmt: 0x5a6672,
+            cmt: 0x56626e,
             sym: 0x38404a,
             code_name: 0x0a5aa8,
             data_name: 0x855400,
@@ -186,7 +186,7 @@ impl Theme {
         ring: 0xffe14d,
         selection: 0x143b5c,
         caret_row: 0x14202c,
-        hl: 0x5c4d00,
+        hl: 0x403500,
         danger: 0xff7b7b,
         danger_soft: 0x4a1616,
         success: 0x5dff7a,
@@ -350,6 +350,7 @@ pub const DEFAULT_UI_SIZE: f32 = 12.;
 static CODE_FONT: RwLock<Option<SharedString>> = RwLock::new(None);
 static CODE_SIZE: AtomicU32 = AtomicU32::new(0);
 static UI_SIZE: AtomicU32 = AtomicU32::new(0);
+static COMPACT_ROWS: AtomicBool = AtomicBool::new(false);
 
 pub fn set_fonts(code_family: &str, code_size: f32, ui_size: f32) {
     *CODE_FONT.write().unwrap() = Some(SharedString::from(code_family.to_owned()));
@@ -372,9 +373,20 @@ pub fn code_font_size() -> f32 {
     }
 }
 
-/// Height of one code row: 20 px at the default 12 px code size.
+/// Comfortable (the default) or compact code rows; see `code_line_height`.
+pub fn set_compact_rows(compact: bool) {
+    COMPACT_ROWS.store(compact, Ordering::Relaxed);
+}
+
+/// Height of one code row: 20 px at the default 12 px code size, 16 px when
+/// compact.
 pub fn code_line_height() -> f32 {
-    (code_font_size() * 5. / 3.).round()
+    let ratio = if COMPACT_ROWS.load(Ordering::Relaxed) {
+        1.35
+    } else {
+        5. / 3.
+    };
+    (code_font_size() * ratio).round()
 }
 
 #[cfg(test)]
@@ -399,23 +411,31 @@ mod tests {
         (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
     }
 
-    /// Every text token must read on every surface it can sit on: the two
+    /// Every text token must read at 4.5:1 on the grounds code text lands on
+    /// in every theme: the selected row and the identifier highlight. The two
     /// themes that carry an accessibility promise (High contrast, and IDA
-    /// Classic's real colours) at 4.5:1 (7:1 for High contrast text).
+    /// Classic's real colours) are checked on every surface.
     #[test]
     fn text_tokens_reach_their_contrast_on_every_surface() {
         let mut failures = Vec::new();
-        for (t, floor) in [(Theme::HIGH_CONTRAST, 4.5), (Theme::IDA_CLASSIC, 4.5)] {
-            let grounds = [
-                ("bg", t.bg),
-                ("surface", t.surface),
-                ("surface2", t.surface2),
-                ("popover", t.popover),
-                ("raised", t.raised),
-                ("hover", t.hover),
-                ("selection", t.selection),
-                ("caret_row", t.caret_row),
-            ];
+        for (t, floor, every_surface) in [
+            (Theme::DARK, 4.5, false),
+            (Theme::LIGHT, 4.5, false),
+            (Theme::HIGH_CONTRAST, 4.5, true),
+            (Theme::IDA_CLASSIC, 4.5, true),
+        ] {
+            let mut grounds = vec![("selection", t.selection), ("hl", t.hl)];
+            if every_surface {
+                grounds.extend([
+                    ("bg", t.bg),
+                    ("surface", t.surface),
+                    ("surface2", t.surface2),
+                    ("popover", t.popover),
+                    ("raised", t.raised),
+                    ("hover", t.hover),
+                    ("caret_row", t.caret_row),
+                ]);
+            }
             let s = t.syntax;
             let texts = [
                 ("text", t.text),
@@ -439,7 +459,7 @@ mod tests {
                 ("ty", s.ty),
             ];
             for (tn, tc) in texts {
-                for (gn, gc) in grounds {
+                for &(gn, gc) in &grounds {
                     let r = contrast(tc, gc);
                     if r < floor {
                         failures.push(format!("{}: {tn} on {gn} = {r:.2}", t.name));

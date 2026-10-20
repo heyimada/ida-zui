@@ -106,6 +106,8 @@ pub struct Workspace {
     busy: bool,
     /// The listing columns last pushed to the open databases.
     applied_listing: (u32, u32),
+    /// The loading screen shows IDA's log (collapsed by default).
+    show_ida_output: bool,
     /// Run requests from open Plugins windows.
     plugin_run_subs: Vec<Subscription>,
     focus: FocusHandle,
@@ -138,6 +140,17 @@ impl Workspace {
                     MenuEvent::Invoke(target) => this.run_menu_target(target.clone(), window, cx),
                 },
             );
+        // The next command (any real key) retires the previous status message.
+        let this = cx.entity().downgrade();
+        let status_sub = cx.intercept_keystrokes(move |ev, _, cx| {
+            if matches!(
+                ev.keystroke.key.as_str(),
+                "shift" | "control" | "alt" | "platform" | "function"
+            ) {
+                return;
+            }
+            this.update(cx, |w, cx| w.clear_status(cx)).ok();
+        });
         let db = Self::make_db(1, window, cx);
         let applied_listing = {
             let st = settings::get(cx);
@@ -162,9 +175,10 @@ impl Workspace {
             close_confirmed: false,
             busy: false,
             applied_listing,
+            show_ida_output: false,
             plugin_run_subs: Vec::new(),
             focus: cx.focus_handle(),
-            _subs: vec![menu_sub],
+            _subs: vec![menu_sub, status_sub],
         }
     }
 
@@ -225,6 +239,7 @@ impl Workspace {
             hex,
             pseudo,
             mode: Mode::Linear,
+            tab_back: None,
             doc: None,
             docs: Vec::new(),
             next_doc: 1,
@@ -434,6 +449,7 @@ impl Workspace {
     }
 
     fn set_mode(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab_back = None;
         self.mode = mode;
         self.doc = None;
         self.sync_views(cx);
@@ -487,9 +503,17 @@ impl Workspace {
         window.focus(&f, cx);
     }
 
-    /// Tab / F5: open the pseudocode pane, or switch focus between the panes.
+    /// Tab / F5: with a split, switch focus between the panes; without one,
+    /// show pseudocode in the main view and return to the previous view. The
+    /// layout is not persisted: only the split toggle does that.
     fn toggle_pseudo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.doc.is_some() {
+            return;
+        }
+        if !self.split {
+            let (mode, back) = crate::database::tab_toggle(self.mode, self.tab_back);
+            self.set_mode(mode, window, cx);
+            self.tab_back = back;
             return;
         }
         let pseudo_focused = self
@@ -497,13 +521,7 @@ impl Workspace {
             .read(cx)
             .focus_handle(cx)
             .contains_focused(window, cx);
-        if !self.split {
-            self.split = true;
-            self.sync_views(cx);
-            self.pseudo
-                .update(cx, |p, cx| window.focus(&p.focus_handle(cx), cx));
-            self.save_layout(cx);
-        } else if pseudo_focused {
+        if pseudo_focused {
             // The other pane of the split: the listing when pseudocode is the main view.
             let f = if self.mode == Mode::Pseudo {
                 self.listing.read(cx).focus_handle(cx)
@@ -1475,9 +1493,17 @@ impl Workspace {
         });
     }
 
+    /// Clears the active database's status message (see `status.rs`).
+    fn clear_status(&mut self, cx: &mut Context<Self>) {
+        self.session.update(cx, |s, cx| s.clear_status(cx));
+    }
+
     fn run_menu_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         match target {
-            Target::Action(action) => window.dispatch_action(action, cx),
+            Target::Action(action) => {
+                self.clear_status(cx);
+                window.dispatch_action(action, cx)
+            }
             Target::Theme(name) => settings::update(cx, |s| s.theme = name.to_owned()),
             Target::CodeFontSize(size) => settings::update(cx, |s| s.code_font_size = size),
             Target::Recent(path) => self.open_path(PathBuf::from(path), window, cx),
@@ -2123,7 +2149,7 @@ impl Render for Workspace {
         self.apply_listing_options(cx);
         let phase_ready = ready;
         let loading = matches!(self.session.read(cx).phase, Phase::Loading { .. });
-        // The loading screen has nothing to focus, so keys (Ctrl+W, the
+        // The loading screen has nothing to focus, so keys (Ctrl+Shift+W, the
         // palette) would miss the workspace's bindings.
         if loading
             && self.dialog.is_none()

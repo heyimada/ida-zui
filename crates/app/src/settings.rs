@@ -129,6 +129,8 @@ pub struct Settings {
     pub code_font: String,
     pub code_font_size: f32,
     pub ui_font_size: f32,
+    /// Tighter code rows (about 25% more lines on screen).
+    pub compact_rows: bool,
     /// Column of the instruction in listing and graph lines (IDA's default is 16).
     pub listing_indent: u32,
     /// Column of the end-of-line comment (IDA's default is 40).
@@ -159,6 +161,7 @@ impl Default for Settings {
             code_font: theme::DEFAULT_CODE_FONT.to_owned(),
             code_font_size: theme::DEFAULT_CODE_SIZE,
             ui_font_size: theme::DEFAULT_UI_SIZE,
+            compact_rows: false,
             listing_indent: DEFAULT_INDENT,
             listing_comment: DEFAULT_COMMENT_COLUMN,
             analysis_on_open: true,
@@ -268,6 +271,7 @@ pub fn apply(cx: &mut App) {
     ida_proto::client::set_ida_dir_setting(s.ida_dir.as_ref().map(PathBuf::from));
     cx.set_global(s.theme());
     theme::set_fonts(&s.code_font, s.code_font_size, s.ui_font_size);
+    theme::set_compact_rows(s.compact_rows);
     crate::actions::apply_keymap(&s.keymap, cx);
     cx.refresh_windows();
 }

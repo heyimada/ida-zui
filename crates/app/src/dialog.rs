@@ -222,7 +222,7 @@ impl Render for ConfirmDialog {
                     } else {
                         ButtonKind::Secondary
                     };
-                    button(("answer", i), format!("{label}  ({})", i + 1), kind, &theme)
+                    button(("answer", i), label.clone(), kind, &theme)
                         .on_click(cx.listener(move |_, _, _, cx| cx.emit(DialogEvent::Answer(i))))
                 })),
             )

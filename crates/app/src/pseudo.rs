@@ -537,6 +537,19 @@ impl Render for PseudoView {
                     commands::show_xrefs(&v.session, info.target.unwrap_or(func), true, cx)
                 })
             }))
+            // Hex-Rays' own comment key; matched on the typed character so it
+            // works wherever `/` sits on the layout.
+            .on_key_down(cx.listener(|v, ev: &gpui::KeyDownEvent, _, cx| {
+                if ev.keystroke.key_char.as_deref() == Some("/")
+                    && !ev.keystroke.modifiers.control
+                    && !ev.keystroke.modifiers.alt
+                {
+                    v.with_item(cx, |v, func, info, cx| {
+                        commands::comment_ea(&v.session, info.ea.unwrap_or(func), false, cx)
+                    });
+                    cx.stop_propagation();
+                }
+            }))
             .child(
                 div()
                     .id("pseudo-body")

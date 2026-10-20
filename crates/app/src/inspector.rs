@@ -394,7 +394,8 @@ impl Inspector {
             ))
             .child(Self::kv(
                 "Convention",
-                Self::mono(f.convention.clone()).text_color(hsla(t.syntax.kw)),
+                Self::mono(f.convention.clone())
+                    .text_color(hsla(convention_color(&f.convention, &t))),
                 &t,
             ))
             .child(Self::kv(
@@ -735,7 +736,7 @@ impl Inspector {
                 d.child(Self::section("Frame", None, &t))
                     .child(Self::kv(
                         "Convention",
-                        Self::mono(cc).text_color(hsla(t.syntax.kw)),
+                        Self::mono(cc.clone()).text_color(hsla(convention_color(&cc, &t))),
                         &t,
                     ))
                     .child(Self::kv("Locals", Self::mono(locals.to_string()), &t))
@@ -934,5 +935,15 @@ impl Render for Inspector {
                     )
                     .child(ibar),
             )
+    }
+}
+
+/// A known calling convention reads as a keyword; "unknown" is a plain fact,
+/// not an error, so it stays muted.
+fn convention_color(cc: &str, t: &Theme) -> u32 {
+    if cc.is_empty() || cc.eq_ignore_ascii_case("unknown") {
+        t.muted
+    } else {
+        t.syntax.kw
     }
 }

@@ -52,6 +52,8 @@ pub struct Database {
     pub hex: Entity<HexView>,
     pub pseudo: Entity<PseudoView>,
     pub mode: Mode,
+    /// The mode Tab returns to from pseudocode (see `tab_toggle`).
+    pub tab_back: Option<Mode>,
     /// The editor tab in front, when it is not the main view.
     pub doc: Option<u64>,
     pub docs: Vec<DocTab>,
@@ -111,5 +113,38 @@ impl Database {
 
     pub fn dirty(&self, cx: &App) -> bool {
         self.session.read(cx).dirty
+    }
+}
+
+/// Tab / F5 without a split: the mode to show next and the mode Tab returns
+/// to. Pseudocode is entered from any other mode and left for the one it came
+/// from (the listing when it was entered some other way).
+pub fn tab_toggle(mode: Mode, back: Option<Mode>) -> (Mode, Option<Mode>) {
+    match mode {
+        Mode::Pseudo => (back.unwrap_or(Mode::Linear), None),
+        from => (Mode::Pseudo, Some(from)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_peeks_at_pseudocode_and_returns_to_the_view_it_left() {
+        for from in [Mode::Linear, Mode::Graph, Mode::Hex] {
+            let (peek, back) = tab_toggle(from, None);
+            assert!(peek == Mode::Pseudo);
+            let (home, back) = tab_toggle(peek, back);
+            assert!(home == from);
+            assert!(back.is_none());
+        }
+    }
+
+    #[test]
+    fn tab_from_pseudocode_chosen_elsewhere_goes_to_the_listing() {
+        let (home, back) = tab_toggle(Mode::Pseudo, None);
+        assert!(home == Mode::Linear);
+        assert!(back.is_none());
     }
 }

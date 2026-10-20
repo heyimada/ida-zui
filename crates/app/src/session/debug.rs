@@ -290,7 +290,7 @@ impl Session {
                 };
                 if let Some(ip) = ip {
                     let at = s.symbol_at(ip);
-                    s.status = Some((format!("Suspended at {at} ({what})").into(), false));
+                    s.set_status(format!("Suspended at {at} ({what})").into(), false, cx);
                     s.cursor = ip;
                     cx.emit(SessionEvent::DebugStopped);
                     cx.emit(SessionEvent::Navigated { ea: ip });
@@ -360,7 +360,7 @@ impl Session {
         let path = (!d.app_path.trim().is_empty()).then(|| d.app_path.trim().to_owned());
         self.dbg.log(LogKind::Info, "Starting the process");
         self.dbg.exception = None;
-        self.status = None;
+        self.status.clear();
         let list = (d.exceptions != ExceptionPolicy::Ida).then(|| self.call(DbgExceptions {}));
         cx.spawn(async move |this, cx| {
             // The exception policy goes in before the process runs.

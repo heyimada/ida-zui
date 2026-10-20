@@ -603,6 +603,9 @@ pub struct ImportRow {
     pub ea: Ea,
     pub module: String,
     pub name: String,
+    /// The short demangled form, empty when the name is not mangled.
+    #[serde(default)]
+    pub short: String,
     pub ordinal: u32,
 }
 
@@ -611,6 +614,9 @@ pub struct ExportRow {
     pub ea: Ea,
     pub ordinal: u64,
     pub name: String,
+    /// The short demangled form, empty when the name is not mangled.
+    #[serde(default)]
+    pub short: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

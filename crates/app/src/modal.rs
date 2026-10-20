@@ -493,6 +493,22 @@ impl Modal {
             .w(px(640.))
             .flex()
             .flex_col()
+            // The noun: what this list is a list of (the footer has the verb).
+            .child(
+                div()
+                    .h(px(32.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .px(px(16.))
+                    .text_size(px(12.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(hsla(t.muted))
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(self.title.clone()),
+            )
             .child(
                 div()
                     .h(px(44.))

@@ -88,7 +88,7 @@ The defaults follow IDA's `cfg/idagui.cfg` where IDA has a key. Every key is edi
 | Undo / redo | `Ctrl+Z` / `Ctrl+Shift+Z` | same (`Ctrl+Y` too) |
 | Debugger | `F9` `F7` `F8` `F2` `Ctrl+F2` `F4` | same |
 
-Differences: the side lists live in a rail on the left instead of floating windows; because `Ctrl+B` is IDA's "search bytes again", the side-panel filter moved to `Ctrl+Shift+B`; saving is `Ctrl+S` (IDA uses `Ctrl+W`) and a database that was just analysed counts as unsaved; there is no database snapshot manager; plugins that need IDA's Qt UI report that they cannot run headless; the debugger is Windows user mode only.
+Differences: the side lists live in a rail on the left instead of floating windows; because `Ctrl+B` is IDA's "search bytes again", the side-panel filter moved to `Ctrl+Shift+B`; `Ctrl+W` saves as in IDA (`Ctrl+S` too) and closing the database is `Ctrl+Shift+W`; a database that was just analysed counts as unsaved; there is no database snapshot manager; plugins that need IDA's Qt UI report that they cannot run headless; the debugger is Windows user mode only.
 
 ## Architecture
 
@@ -165,7 +165,7 @@ Opening a binary steps the auto-analysis queues instead of waiting in one call. 
 
 ## Several databases
 
-Every open database is a chip in the title strip: file name, a spinner and elapsed time while it analyses, an unsaved dot and a close button. Each has its own host process, session, views, editor tabs, history and panel selections; the menu bar, settings, keymap and panel sizes are shared. Opening a file (File > Open, drag and drop, recent files, `ida-zui a.exe b.dll`) adds a chip, and opening one that is already open switches to it. `Ctrl+Tab` / `Ctrl+Shift+Tab` and `Ctrl+1..9` switch, `Ctrl+W` / the chip's X close one (asking Save / Don't save / Cancel for that database), and the Windows menu lists them. Closing the window asks once for all unsaved databases, then closes every host. Tabs in the background neither repaint the window nor poll.
+Every open database is a chip in the title strip: file name, a spinner and elapsed time while it analyses, an unsaved dot and a close button. Each has its own host process, session, views, editor tabs, history and panel selections; the menu bar, settings, keymap and panel sizes are shared. Opening a file (File > Open, drag and drop, recent files, `ida-zui a.exe b.dll`) adds a chip, and opening one that is already open switches to it. `Ctrl+Tab` / `Ctrl+Shift+Tab` and `Ctrl+1..9` switch, `Ctrl+Shift+W` / the chip's X close one (asking Save / Don't save / Cancel for that database), and the Windows menu lists them. Closing the window asks once for all unsaved databases, then closes every host. Tabs in the background neither repaint the window nor poll.
 
 ## Menus, settings and keys
 
@@ -196,16 +196,18 @@ IDA's defaults are used where IDA has one.
 | `Esc` / `Alt+←`, `Ctrl+Enter` / `Alt+→` | Back, forward |
 | `Enter`, double-click | Follow the name under the caret, or expand a collapsed item |
 | `Space` | Toggle between linear and graph view |
-| `Tab` / `F5` | Open pseudocode, or switch focus between the panes |
+| `Tab` / `F5` | Show pseudocode in the main view, `Tab` again returns to the view you left (with the split on: switch focus between the panes). The layout is not saved; only the split toggle is |
 | `Ctrl+Shift+H` / `Ctrl+Shift+D` | Hex view / disassembly |
 | `N` | Rename (a local variable in pseudocode) |
 | `:` / `;` | Comment / repeatable comment (IDA's assignment) |
+| `/` (pseudocode) | Comment (Hex-Rays' key) |
 | `Y` | Set the type (a function prototype, or a local variable's type in pseudocode) |
 | `X` / `Shift+X` | Cross references to / from |
 | `C` `D` `A` `U` `P` | Make code, cycle data size, make string, undefine, create function |
 | `Shift+Del` | Delete function |
 | `-` | Expand or collapse a function or hidden range |
-| `Ctrl+S`, `Ctrl+Z`, `Ctrl+Y` | Save, undo, redo |
+| `Ctrl+W` (or `Ctrl+S`), `Ctrl+Z`, `Ctrl+Y` | Save, undo, redo |
+| `Ctrl+Shift+W` | Close the database |
 | `Ctrl+Shift+B` | Filter the side panel |
 | `Shift+F1` / `Shift+F9` / `Shift+F10` | Local types editor / pick a structure / pick an enum |
 | `Ctrl+X` / `Ctrl+J` | Xrefs to / from (IDA's keys; `X`, `Shift+X` also work) |
