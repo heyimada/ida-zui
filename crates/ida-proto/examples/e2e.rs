@@ -1941,6 +1941,215 @@ fn operand_representation(
     }
 }
 
+/// Casts the pseudocode of the sample usually contains.
+const CASTS: [&str; 8] = [
+    "(unsigned int)",
+    "(char *)",
+    "(__int64)",
+    "(unsigned __int64)",
+    "(_QWORD)",
+    "(_DWORD)",
+    "(_BYTE *)",
+    "(unsigned __int8)",
+];
+
+fn pseudo_text(p: &Pseudocode) -> Vec<String> {
+    p.lines.iter().map(|l| tags::strip(l)).collect()
+}
+
+/// `\` (hide casts): the option removes casts from a fresh decompilation, and the
+/// decompilation everything else shares keeps them.
+fn hide_casts(c: &Client, funcs: &[FuncRow], out: &mut String, check: &mut impl FnMut(bool, &str)) {
+    writeln!(
+        out,
+        "
+== hide casts"
+    )
+    .unwrap();
+    let mut pick = None;
+    for f in funcs.iter().filter(|f| !f.library && !f.thunk).take(60) {
+        let Ok(p) = c.call_blocking(Decompile { ea: f.start }) else {
+            continue;
+        };
+        let text = pseudo_text(&p);
+        if let Some(cast) = CASTS.iter().find(|k| text.iter().any(|l| l.contains(**k))) {
+            pick = Some((f.start, *cast, text, p));
+            break;
+        }
+    }
+    let Some((ea, cast, normal, normal_pc)) = pick else {
+        check(false, "a function whose pseudocode contains a cast exists");
+        return;
+    };
+    let count = |t: &[String]| {
+        t.iter()
+            .map(|l| CASTS.iter().map(|k| l.matches(*k).count()).sum::<usize>())
+            .sum::<usize>()
+    };
+    let shown = normal.iter().find(|l| l.contains(cast)).unwrap().trim();
+    let hidden = c
+        .call_blocking(DecompileOpts {
+            ea,
+            hide_casts: true,
+        })
+        .unwrap();
+    let hidden_text = pseudo_text(&hidden);
+    let again = pseudo_text(&c.call_blocking(Decompile { ea }).unwrap());
+    let plain = pseudo_text(
+        &c.call_blocking(DecompileOpts {
+            ea,
+            hide_casts: false,
+        })
+        .unwrap(),
+    );
+    writeln!(
+        out,
+        "{ea:#x} cast {cast}: {} cast(s) normally, {} with hide_casts
+  normal: {shown}",
+        count(&normal),
+        count(&hidden_text)
+    )
+    .unwrap();
+    if let Some(l) = normal
+        .iter()
+        .zip(&hidden_text)
+        .find(|(a, b)| a != b && a.contains(cast))
+    {
+        writeln!(out, "  hidden: {}", l.1.trim()).unwrap();
+    }
+    check(
+        hidden.error.is_none() && !hidden_text.is_empty(),
+        "decompile_opts with hide_casts decompiles",
+    );
+    check(
+        count(&normal) > 0 && count(&hidden_text) == 0,
+        "hide_casts removes the casts the normal pseudocode shows",
+    );
+    check(
+        !hidden_text.iter().any(|l| l.contains(cast)),
+        "hide_casts leaves the sample cast out of the text",
+    );
+    check(
+        again == normal && plain == normal,
+        "a normal decompile after hide_casts still shows the casts (the cache is untouched)",
+    );
+
+    // Clicks: the names on the line that lost its cast resolve the same way in
+    // both trees (the anchors of the hidden reply index the hidden tree).
+    let line_ix = normal.iter().position(|l| l.contains(cast)).unwrap();
+    let resolve = |tagged: &str, hide: bool| -> Vec<(String, Option<Ea>, Option<String>)> {
+        let parsed = tags::parse(tagged);
+        let mut found = Vec::new();
+        for run in &parsed.runs {
+            let word = parsed.text[run.range.clone()].to_owned();
+            if !word.starts_with(|ch: char| ch.is_alphabetic() || ch == '_') {
+                continue;
+            }
+            let Some(anchor) = parsed.anchor_at(run.range.start) else {
+                continue;
+            };
+            let item = if hide {
+                c.call_blocking(PseudoItemOpts {
+                    func: ea,
+                    item: anchor,
+                    hide_casts: true,
+                })
+            } else {
+                c.call_blocking(PseudoItem {
+                    func: ea,
+                    item: anchor,
+                })
+            }
+            .unwrap();
+            found.push((word, item.target, item.lvar));
+        }
+        found
+    };
+    let hidden_line = hidden
+        .lines
+        .iter()
+        .find(|l| {
+            let t = tags::strip(l);
+            t.trim() == shown.replace(cast, "").trim()
+                || t.trim() == shown.replacen(cast, "", 1).trim()
+        })
+        .cloned();
+    let normal_hits = resolve(&normal_pc.lines[line_ix], false);
+    let hidden_hits = hidden_line
+        .as_deref()
+        .map(|l| resolve(l, true))
+        .unwrap_or_default();
+    writeln!(
+        out,
+        "  clicks normal: {normal_hits:?}
+  clicks hidden: {hidden_hits:?}"
+    )
+    .unwrap();
+    let resolved = hidden_hits
+        .iter()
+        .filter(|(_, t, v)| t.is_some() || v.is_some())
+        .count();
+    check(
+        hidden_line.is_some() && resolved > 0,
+        "names on the line that lost its cast resolve to an object or variable in hidden mode",
+    );
+    check(
+        hidden_hits
+            .iter()
+            .filter(|(_, t, v)| t.is_some() || v.is_some())
+            .all(|(w, t, v)| {
+                normal_hits
+                    .iter()
+                    .any(|(nw, nt, nv)| nw == w && nt == t && nv == v)
+            }),
+        "hidden-mode clicks resolve to the same ea or variable as in normal mode",
+    );
+    // The cast-free tree follows edits: a renamed variable shows in it at once.
+    if let Some((_, _, Some(var))) = hidden_hits.iter().find(|(_, _, v)| v.is_some()) {
+        let hidden_with = |c: &Client| {
+            pseudo_text(
+                &c.call_blocking(DecompileOpts {
+                    ea,
+                    hide_casts: true,
+                })
+                .unwrap(),
+            )
+        };
+        c.call_blocking(RenameLvar {
+            func: ea,
+            old: var.clone(),
+            new: "e2e_hc_renamed".into(),
+        })
+        .unwrap();
+        let renamed = hidden_with(c);
+        c.call_blocking(RenameLvar {
+            func: ea,
+            old: "e2e_hc_renamed".into(),
+            new: var.clone(),
+        })
+        .unwrap();
+        let restored = hidden_with(c);
+        check(
+            renamed.iter().any(|l| l.contains("e2e_hc_renamed"))
+                && !restored.iter().any(|l| l.contains("e2e_hc_renamed"))
+                && count(&restored) == 0,
+            "the cast-free pseudocode follows a variable rename and its undo",
+        );
+    }
+    check(
+        c.call_blocking(PseudoItem {
+            func: ea,
+            item: normal_pc
+                .lines
+                .iter()
+                .find_map(|l| tags::parse(l).anchors.first().map(|a| a.value))
+                .unwrap(),
+        })
+        .is_ok(),
+        "normal clicks still resolve after hidden-mode clicks",
+    );
+}
+
 fn arrays_and_strings(
     c: &Client,
     strings: &[StrRow],
@@ -3799,6 +4008,9 @@ fn main() {
         &mut check,
     );
     eprintln!("[{:6.1}s] types and frames", t0.elapsed().as_secs_f32());
+    if info.hexrays {
+        hide_casts(&client, &funcs, &mut out, &mut check);
+    }
 
     // Listing options: the instruction column of the generated lines follows
     // set_listing_options; the original value is restored afterwards.
