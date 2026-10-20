@@ -173,8 +173,11 @@ impl Workspace {
         {
             let origin = cv.origin(cx);
             let ea = t.ea;
-            self.session
-                .update(cx, |s, cx| s.set_cursor(ea, origin, cx));
+            let _ = origin;
+            self.session.update(cx, |s, cx| {
+                s.cursor = ea;
+                cx.notify();
+            });
         }
         self.sync_views(cx);
         self.focus_main(window, cx);
@@ -591,8 +594,18 @@ impl Workspace {
             },
         };
         db.session.update(cx, |s, cx| {
-            s.driver = driver;
-            if let (Some((ea, by_function)), Some(d)) = (front_ea, driver) {
+            let previous = std::mem::replace(&mut s.driver, driver);
+            // Only a new driver changes the address the window acts on. Unpinned views all
+            // follow the cursor, so one taking over from another (the Tab peek ends) must
+            // show the cursor, not push its own, maybe not yet loaded, place. A pinned view
+            // keeps its own place, which becomes the cursor; so does the main view
+            // when the pinned tab that had the cursor is gone.
+            let changed = previous.map(|p| p.origin) != driver.map(|d| d.origin);
+            let adopts = driver.is_some_and(|d| !d.pinned) && previous.is_none_or(|p| !p.pinned);
+            if let (Some((ea, by_function)), Some(d)) = (front_ea, driver)
+                && changed
+                && !adopts
+            {
                 // A pseudocode view knows its function, not the exact address.
                 let same_place = if by_function {
                     s.function_at(s.cursor).map(|f| f.start) == Some(ea)

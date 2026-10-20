@@ -264,6 +264,7 @@ impl Workspace {
             docs: Vec::new(),
             next_doc: 1,
             floating: Vec::new(),
+            split_tab: None,
             sidebar,
             focus_ctx,
             inspector,
@@ -584,8 +585,17 @@ impl Workspace {
         if self.right.is_empty() {
             let ea = self.session.read(cx).cursor;
             self.open_in_right(ViewKind::Pseudocode, ea, false, window, cx);
+            if !self.right.is_empty() {
+                self.split_tab = Some(self.next_doc - 1);
+            }
         } else {
-            self.close_right_pane(window, cx);
+            // The tab the toggle made goes with it; others in the pane return to one pane.
+            if let Some(id) = self.split_tab.take() {
+                self.close_doc(id, window, cx);
+            }
+            if !self.right.is_empty() {
+                self.close_right_pane(window, cx);
+            }
         }
     }
 
@@ -2459,17 +2469,18 @@ impl Workspace {
                 .child(w.tab_strip(right, &t, cx))
                 .when(!right && w.doc.is_none(), |d| d.child(w.jump_bar(&t, cx)))
                 .child(w.pane_content(front))
-                // A click in a pane gives it the keyboard.
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(move |w, _, _, cx| {
-                        if w.focus_right != right && !w.right.is_empty() {
-                            w.focus_right = right;
-                            w.sync_views(cx);
-                            cx.notify();
-                        }
-                    }),
-                )
+                // A click in a pane gives it the keyboard, before the view under the click
+                // reports its caret (the session only listens to the view that drives).
+                .capture_any_mouse_down(cx.listener(move |w, ev: &gpui::MouseDownEvent, _, cx| {
+                    if ev.button == gpui::MouseButton::Left
+                        && w.focus_right != right
+                        && !w.right.is_empty()
+                    {
+                        w.focus_right = right;
+                        w.sync_views(cx);
+                        cx.notify();
+                    }
+                }))
                 .on_drop(
                     cx.listener(move |w, d: &workspace_tabs::TabDrag, window, cx| {
                         w.move_tab(d.id, right, None, window, cx)

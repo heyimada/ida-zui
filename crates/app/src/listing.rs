@@ -579,7 +579,7 @@ impl ListingView {
             operand: self
                 .rows
                 .get(self.cursor)
-                .and_then(|r| crate::operands::operand_at(&r.line.text, self.caret_col)),
+                .and_then(|r| crate::operands::caret_operand(&r.line, self.caret_col)),
         };
         self.session.update(cx, |s, cx| s.set_caret(caret, cx));
     }
@@ -659,7 +659,7 @@ impl ListingView {
         cx: &mut Context<Self>,
     ) {
         let Some(ea) = self.cursor_ea() else { return };
-        let title = self.token().unwrap_or_else(|| format!("{ea:X}"));
+        let title = crate::context_menu::title(&self.session, self.token(), ea, cx);
         let entries = crate::context_menu::listing(&self.session.read(cx).ops(), cx);
         crate::context_menu::show(&self.session, pos, title, entries, keyboard, cx);
     }

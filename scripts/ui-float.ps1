@@ -36,6 +36,8 @@ $steps2 = @(
     # a main-window command says so; the patch list opens in the window
     "action:ida::NextTab", "wait:500", "shot:float_unavailable",
     "action:ida::ShowPatches", "wait:1500", "shot:float_patches", "key:escape", "wait:400",
+    # panel commands are forwarded to the main window: the inspector goes away there
+    "action:ida::ToggleInspector", "wait:800", "win:0", "shot:float_forwarded_main", "win:2", "action:ida::ToggleInspector", "wait:500",
     # closing returns the views as tabs
     "action:ida::CloseTab", "wait:2000", "win:1", "action:ida::CloseTab", "wait:2500", "win:0", "shot:float_docked"
 )

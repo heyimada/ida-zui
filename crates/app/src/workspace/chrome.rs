@@ -684,7 +684,7 @@ impl Workspace {
             self.tool_button::<ToggleSplit>(
                 "tb-split",
                 "split",
-                "Split with pseudocode",
+                "Pseudocode pane",
                 self.split,
                 true,
                 &t,

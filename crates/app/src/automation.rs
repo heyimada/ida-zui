@@ -104,6 +104,14 @@ pub fn start(path: PathBuf, handle: AnyWindowHandle, cx: &mut App) {
 
 fn run(line: &str, channel: &std::path::Path, window: &mut Window, cx: &mut App) -> bool {
     let (cmd, arg) = line.split_once(' ').unwrap_or((line, ""));
+    // An action is dispatched from the focused element as found in the last *painted*
+    // frame (`Window::dispatch_action`). A window that is covered or throttled may not
+    // have painted since the focus moved (a prompt closed, a dialog opened), and the
+    // action would then reach no handler. Paint first, so every command lands where a
+    // user's would.
+    if matches!(cmd, "key" | "type" | "action") {
+        window.draw(cx).clear();
+    }
     let xy = || {
         let (x, y) = arg.split_once(' ')?;
         Some(point(

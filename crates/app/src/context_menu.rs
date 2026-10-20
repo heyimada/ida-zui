@@ -28,6 +28,23 @@ macro_rules! c {
     };
 }
 
+/// The title of a context menu: the name under the caret when there is one,
+/// else the place as `name+off`, else the address. The same in every view.
+pub fn title(session: &Entity<Session>, token: Option<String>, ea: u64, cx: &App) -> String {
+    match token {
+        Some(t) if !t.is_empty() && !address_like(&t) => t,
+        _ => session.read(cx).symbol_at(ea),
+    }
+}
+
+/// A token that is a bare address (`140002850`, `0x140002850`), not a name.
+fn address_like(t: &str) -> bool {
+    t.len() >= 6
+        && t.trim_start_matches("0x")
+            .chars()
+            .all(|c| c.is_ascii_hexdigit())
+}
+
 /// A submenu entry.
 pub fn sub(label: &str, entries: Vec<Entry>) -> Entry {
     Entry::Sub {
@@ -117,7 +134,11 @@ pub fn listing(ops: &Ops, cx: &App) -> Vec<Entry> {
         c!(MakeFunction, cx),
         c!(Undefine, cx),
         Entry::Sep,
-        sub("Operand types", operand_entries(ops, cx)),
+        Entry::Sub {
+            label: "Operand types".into(),
+            enabled: ops.has_operand(),
+            entries: operand_entries(ops, cx),
+        },
         c!(SetStringType, cx),
         c!(EditFunctionProps, cx),
         Entry::Sep,
@@ -220,4 +241,15 @@ pub fn address_row(
         zui_editor::clipboard::write(format!("{ea:X}"), cx)
     }));
     out
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::address_like;
+
+    #[test]
+    fn a_bare_address_is_not_a_name_but_a_symbol_is() {
+        assert!(address_like("140002850") && address_like("0x140002850"));
+        assert!(!address_like("main") && !address_like("deadbeef_x") && !address_like("add"));
+    }
 }

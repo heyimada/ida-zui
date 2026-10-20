@@ -139,6 +139,12 @@ impl Workspace {
     }
 
     pub(super) fn set_operand(&mut self, repr: OpRepr, cx: &mut Context<Self>) {
+        if !self.session.read(cx).ops().has_operand() {
+            self.session.update(cx, |s, cx| {
+                s.info_msg("No numeric operand under the caret", cx)
+            });
+            return;
+        }
         let (ea, op) = self.edit_target(cx);
         self.session.update(cx, |s, cx| {
             s.mutate(

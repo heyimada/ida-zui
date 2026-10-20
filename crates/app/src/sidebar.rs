@@ -102,11 +102,11 @@ const fn col(title: &'static str, width: f32, grow: bool, numeric: bool) -> ColS
 }
 
 const FUNCTION_COLS: [ColSpec; 5] = [
-    col("Name", 150., true, false),
-    col("Segment", 56., false, false),
-    col("Start", 78., false, true),
-    col("Length", 46., false, true),
-    col("Flags", 52., false, false),
+    col("Name", 196., true, false),
+    col("Segment", 52., false, false),
+    col("Start", 76., false, true),
+    col("Length", 42., false, true),
+    col("Flags", 48., false, false),
 ];
 const NAME_COLS: [ColSpec; 3] = [
     col("Address", 78., false, true),
@@ -750,6 +750,28 @@ impl Sidebar {
         cx.notify();
     }
 
+    /// Ctrl+C: the selected row as tab-separated columns (name and detail for the plain lists).
+    fn copy_row(&mut self, cx: &mut Context<Self>) {
+        let Some(&i) = self.filtered.get(self.selected) else {
+            return;
+        };
+        let item = &self.items[i];
+        let text = if item.cells.is_empty() {
+            if item.detail.is_empty() {
+                item.label.to_string()
+            } else {
+                format!("{}	{}", item.label, item.detail)
+            }
+        } else {
+            item.cells
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join("	")
+        };
+        zui_editor::clipboard::write(text, cx);
+    }
+
     fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
         if self.filtered.is_empty() {
             return;
@@ -786,7 +808,14 @@ impl Render for Sidebar {
         let entity = cx.entity();
         let tab = self.tab;
         let cols = columns(tab);
-        let widths = cols.map(|c| self.widths(c)).unwrap_or_default();
+        let mut widths = cols.map(|c| self.widths(c)).unwrap_or_default();
+        // One segment: the Segment column says nothing, so it is not drawn.
+        let hidden = (tab == Tab::Functions && self.segments.len() == 1).then_some(1usize);
+        if let Some(h) = hidden
+            && let Some(w) = widths.get_mut(h)
+        {
+            *w = 0.;
+        }
         let total_w: f32 = widths.iter().sum();
         let rows_widths = widths.clone();
         let list = uniform_list("sidebar-items", count, move |range, _window, _cx| {
@@ -829,33 +858,36 @@ impl Render for Sidebar {
                             })
                         });
                     match cols {
-                        Some(cols) => row.children(cols.iter().enumerate().map(|(c, spec)| {
-                            let text = it.cells.get(c).cloned().unwrap_or_default();
-                            let w = rows_widths.get(c).copied().unwrap_or(spec.width);
-                            table_cell(spec, w, &theme)
-                                .when(spec.numeric, |d| {
-                                    d.font_family(code_font_name())
-                                        .text_size(px(11.))
-                                        .text_color(hsla(theme.muted))
-                                })
-                                .when(spec.title == "Flags", |d| {
-                                    d.children(
-                                        it.flags
-                                            .iter()
-                                            .map(|f| ui::badge(*f, ui::BadgeKind::Neutral, &theme)),
-                                    )
-                                })
-                                .when(spec.title != "Flags", |d| {
-                                    d.child(
-                                        div()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .text_ellipsis()
-                                            .child(text),
-                                    )
-                                })
-                        })),
+                        Some(cols) => row.children(
+                            cols.iter()
+                                .enumerate()
+                                .filter(|(c, _)| Some(*c) != hidden)
+                                .map(|(c, spec)| {
+                                    let text = it.cells.get(c).cloned().unwrap_or_default();
+                                    let w = rows_widths.get(c).copied().unwrap_or(spec.width);
+                                    table_cell(spec, w, &theme)
+                                        .when(spec.numeric, |d| {
+                                            d.font_family(code_font_name())
+                                                .text_size(px(11.))
+                                                .text_color(hsla(theme.muted))
+                                        })
+                                        .when(spec.title == "Flags", |d| {
+                                            d.children(it.flags.iter().map(|f| {
+                                                ui::badge(*f, ui::BadgeKind::Neutral, &theme)
+                                            }))
+                                        })
+                                        .when(spec.title != "Flags", |d| {
+                                            d.child(
+                                                div()
+                                                    .min_w_0()
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .text_ellipsis()
+                                                    .child(text),
+                                            )
+                                        })
+                                }),
+                        ),
                         None => row
                             .child(
                                 div()
@@ -937,6 +969,7 @@ impl Render for Sidebar {
                     v.context_menu(v.selected, pos, cx)
                 }),
             )
+            .on_action(cx.listener(|v, _: &crate::actions::Copy, _, cx| v.copy_row(cx)))
             .on_action(cx.listener(|v, _: &SelectPrev, _, cx| v.step(-1, cx)))
             .on_action(cx.listener(|v, _: &SelectNext, _, cx| v.step(1, cx)))
             .on_action(cx.listener(|v, _: &Confirm, _, cx| {
@@ -1034,43 +1067,48 @@ impl Sidebar {
             .text_size(px(11.))
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(hsla(t.muted))
-            .children(cols.iter().enumerate().map(|(c, spec)| {
-                let sorted = self.table.sort == Some(c);
-                let arrow = if !sorted {
-                    ""
-                } else if self.table.descending {
-                    "\u{2193}"
-                } else {
-                    "\u{2191}"
-                };
-                let w = widths.get(c).copied().unwrap_or(spec.width);
-                table_cell(spec, w, &t)
-                    .id(("side-col", c))
-                    .relative()
-                    .cursor_pointer()
-                    .when(sorted, |d| d.text_color(hsla(t.text)))
-                    .hover(|d| d.bg(hsla(t.hover)))
-                    .on_click(cx.listener(move |v, _, _, cx| v.click_header(c, cx)))
-                    .child(spec.title)
-                    .child(arrow)
-                    .child(
-                        div()
-                            .id(("side-col-edge", c))
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .right_0()
-                            .w(px(5.))
-                            .cursor(gpui::CursorStyle::ResizeLeftRight)
-                            .on_mouse_down(
-                                gpui::MouseButton::Left,
-                                cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
-                                    v.resizing = Some((c, f32::from(ev.position.x)));
-                                    cx.stop_propagation();
-                                }),
-                            ),
-                    )
-            }))
+            .children(
+                cols.iter()
+                    .enumerate()
+                    .filter(|(c, _)| widths.get(*c) != Some(&0.))
+                    .map(|(c, spec)| {
+                        let sorted = self.table.sort == Some(c);
+                        let arrow = if !sorted {
+                            ""
+                        } else if self.table.descending {
+                            "\u{2193}"
+                        } else {
+                            "\u{2191}"
+                        };
+                        let w = widths.get(c).copied().unwrap_or(spec.width);
+                        table_cell(spec, w, &t)
+                            .id(("side-col", c))
+                            .relative()
+                            .cursor_pointer()
+                            .when(sorted, |d| d.text_color(hsla(t.text)))
+                            .hover(|d| d.bg(hsla(t.hover)))
+                            .on_click(cx.listener(move |v, _, _, cx| v.click_header(c, cx)))
+                            .child(spec.title)
+                            .child(arrow)
+                            .child(
+                                div()
+                                    .id(("side-col-edge", c))
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .right_0()
+                                    .w(px(5.))
+                                    .cursor(gpui::CursorStyle::ResizeLeftRight)
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Left,
+                                        cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
+                                            v.resizing = Some((c, f32::from(ev.position.x)));
+                                            cx.stop_propagation();
+                                        }),
+                                    ),
+                            )
+                    }),
+            )
     }
 }
 

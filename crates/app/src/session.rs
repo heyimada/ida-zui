@@ -664,6 +664,7 @@ impl Session {
         crate::operands::Ops {
             rows: self.op_repr.clone(),
             op: self.caret.operand.unwrap_or(0),
+            on_operand: self.caret.operand.is_some(),
         }
     }
 
@@ -740,7 +741,13 @@ impl Session {
         follows(self.driver, origin, pinned)
     }
 
+    /// A view reports where its caret is. Only the view the user drives
+    /// (`driver`) may: a hidden or background view finishing a load late must
+    /// not move what the status bar, the inspector and every command act on.
     pub fn set_cursor(&mut self, ea: Ea, origin: Origin, cx: &mut Context<Self>) {
+        if self.driver.is_some_and(|d| d.origin != origin) {
+            return;
+        }
         if self.cursor != ea {
             self.cursor = ea;
             // Keep the current history slot pointing at where we are.
@@ -761,6 +768,11 @@ impl Session {
     }
 
     pub fn set_caret(&mut self, caret: Caret, cx: &mut Context<Self>) {
+        if let (Some(d), Some(o)) = (self.driver, caret.origin)
+            && d.origin != o
+        {
+            return;
+        }
         if self.caret != caret {
             self.caret = caret;
             cx.emit(SessionEvent::CaretChanged);

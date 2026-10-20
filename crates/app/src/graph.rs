@@ -491,7 +491,7 @@ impl GraphView {
                 .blocks
                 .get(b)
                 .and_then(|k| k.lines.get(l))
-                .and_then(|(_, line)| crate::operands::operand_at(&line.text, self.caret_col)),
+                .and_then(|(_, line)| crate::operands::caret_operand(line, self.caret_col)),
         };
         self.session.update(cx, |s, cx| s.set_caret(caret, cx));
     }
@@ -775,7 +775,7 @@ impl GraphView {
 
     fn open_context_menu(&mut self, pos: Point<Pixels>, keyboard: bool, cx: &mut Context<Self>) {
         let Some(ea) = self.cursor_ea() else { return };
-        let title = self.token().unwrap_or_else(|| format!("{ea:X}"));
+        let title = crate::context_menu::title(&self.session, self.token(), ea, cx);
         let entries = crate::context_menu::listing(&self.session.read(cx).ops(), cx);
         crate::context_menu::show(&self.session, pos, title, entries, keyboard, cx);
     }

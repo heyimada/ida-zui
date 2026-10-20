@@ -626,7 +626,7 @@ impl HexView {
 
     fn open_context_menu(&mut self, pos: Point<Pixels>, keyboard: bool, cx: &mut Context<Self>) {
         let entries = crate::context_menu::hex(cx);
-        let title = format!("{:X}", self.cursor);
+        let title = crate::context_menu::title(&self.session, None, self.cursor, cx);
         crate::context_menu::show(&self.session, pos, title, entries, keyboard, cx);
     }
 

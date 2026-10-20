@@ -73,6 +73,8 @@ pub struct Database {
     /// The keyboard is in the right pane.
     pub focus_right: bool,
     pub next_doc: u64,
+    /// The pseudocode tab the split toggle opened (toggling off closes it again).
+    pub split_tab: Option<u64>,
     /// Views in windows of their own.
     pub floating: Vec<Floating>,
     pub sidebar: Entity<Sidebar>,

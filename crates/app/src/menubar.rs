@@ -413,7 +413,7 @@ pub fn build(
                 Entry::Sep,
                 Entry::Sub {
                     label: "&Operand types".into(),
-                    enabled: ready,
+                    enabled: ready && ops.has_operand(),
                     entries: crate::context_menu::operand_entries(ops, cx),
                 },
                 c!(DefineArray),
@@ -486,9 +486,9 @@ pub fn build(
                 c!(ShowGraph, "Graph"),
                 c!(ShowHex, "Hex"),
                 c!(ShowPseudocode, "Pseudocode"),
-                c!(TogglePseudocode, "Switch to pseudocode pane"),
-                toggle(c!(ToggleSplit, "Split with pseudocode"), view.split),
-                c!(MoveToOtherPane, "Split right / move tab to the other pane"),
+                c!(TogglePseudocode, "Peek at pseudocode (Tab / F5)"),
+                toggle(c!(ToggleSplit, "Pseudocode pane (toggle)"), view.split),
+                c!(MoveToOtherPane, "Move tab to other pane"),
                 c!(MoveToNewWindow, "Move tab to a new window"),
                 toggle(c!(ToggleHideCasts, "Hide casts"), view.hide_casts),
                 Entry::Sub {

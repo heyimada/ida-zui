@@ -10,6 +10,7 @@ use crate::menubar::{MenuBar, MenuEvent, Target};
 use crate::modal::{Choice, ChoiceValue, Modal, ModalEvent, Style as ModalStyle};
 use crate::session::{Driver, Session, SessionEvent, SubmitFn};
 use crate::theme::{Theme, UI_FONT, hsla, hsla_a};
+use gpui::Action as _;
 use gpui::{
     AnyWindowHandle, App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, Global,
     ParentElement, Render, SharedString, Styled, Subscription, WeakEntity, Window, WindowBounds,
@@ -589,6 +590,14 @@ impl FloatingWindow {
         );
     }
 
+    /// A command of the main window (panels, settings, help, the menus): run there.
+    fn to_main(&self, action: Box<dyn gpui::Action>, cx: &mut Context<Self>) {
+        let main = self.main;
+        cx.defer(move |cx| {
+            let _ = main.update(cx, |_, window, cx| window.dispatch_action(action, cx));
+        });
+    }
+
     /// A command that only makes sense in the main window.
     fn unavailable(&self, cx: &mut Context<Self>) {
         self.session.update(cx, |s, cx| {
@@ -771,6 +780,144 @@ impl Render for FloatingWindow {
             .on_action(cx.listener(|this, _: &PatchApply, window, cx| {
                 this.forward(cx, |w, cx| w.patch_apply(window, cx))
             }))
+            .on_action(
+                cx.listener(|this, a: &ToggleSidebar, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ToggleInspector, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ToggleBottomPanel, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ToggleOutput, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ShowXrefsPanel, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ShowPythonConsole, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &RunScriptFile, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &FocusSidebar, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ShowFunctions, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(cx.listener(|this, a: &ShowNames, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(
+                cx.listener(|this, a: &ShowStrings, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ShowImports, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ShowExports, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ShowSegments, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(cx.listener(|this, a: &ShowTypes, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(
+                cx.listener(|this, a: &ShowLocalTypes, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ShowStructures, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(cx.listener(|this, a: &ShowEnums, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(cx.listener(|this, a: &ShowFrame, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(
+                cx.listener(|this, a: &ShowSignatures, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ShowPlugins, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ShowProximity, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &CommandPalette, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(cx.listener(|this, a: &OpenFile, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(cx.listener(|this, a: &LocateIda, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(
+                cx.listener(|this, a: &OpenSettings, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(cx.listener(|this, a: &OpenKeymap, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(
+                cx.listener(|this, a: &ShowShortcuts, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(cx.listener(|this, a: &About, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(
+                cx.listener(|this, a: &ShowDocumentation, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ReportIssue, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ShowComingFromIda, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(cx.listener(|this, a: &Save, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(
+                cx.listener(|this, a: &ShowBreakpoints, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ShowRegisters, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(cx.listener(|this, a: &ShowStack, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(cx.listener(|this, a: &ShowMemory, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(
+                cx.listener(|this, a: &ShowCallStack, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ShowThreads, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ShowModules, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ShowDebugEvents, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ShowExceptions, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &DebuggerOptions, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(cx.listener(|this, a: &MenuFile, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(cx.listener(|this, a: &MenuEdit, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(cx.listener(|this, a: &MenuJump, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(cx.listener(|this, a: &MenuSearch, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(cx.listener(|this, a: &MenuView, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(
+                cx.listener(|this, a: &MenuDebugger, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &MenuOptions, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &MenuWindows, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(cx.listener(|this, a: &MenuHelp, _, cx| this.to_main(a.boxed_clone(), cx)))
+            .on_action(
+                cx.listener(|this, a: &FocusMenuBar, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ResetLayout, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ToggleHideCasts, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &ToggleMinimap, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &CloseDatabase, _, cx| this.to_main(a.boxed_clone(), cx)),
+            )
+            .on_action(cx.listener(|this, a: &Quit, _, cx| this.to_main(a.boxed_clone(), cx)))
             .on_action(cx.listener(|this, _: &DebugAttach, _, cx| this.unavailable(cx)))
             .on_action(cx.listener(|this, _: &ToggleSplit, _, cx| this.unavailable(cx)))
             .on_action(cx.listener(|this, _: &MoveToOtherPane, _, cx| this.unavailable(cx)))

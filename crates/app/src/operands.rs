@@ -10,11 +10,18 @@ use ida_proto::{ArrayElem, OpRepr, OpReprKind, OpReprRow};
 pub struct Ops {
     pub rows: Vec<OpReprRow>,
     pub op: u32,
+    /// The caret is on an operand of the line (not on a label or a comment).
+    pub on_operand: bool,
 }
 
 impl Ops {
     pub fn kind(&self) -> OpReprKind {
         kind_of(&self.rows, self.op)
+    }
+
+    /// Whether the caret is on an operand the representation commands apply to.
+    pub fn has_operand(&self) -> bool {
+        self.on_operand && self.rows.iter().any(|r| r.op == self.op)
     }
 
     pub fn negated(&self) -> bool {
@@ -26,6 +33,15 @@ impl Ops {
     }
 }
 use std::path::{Path, PathBuf};
+
+/// The operand under the caret of a listing line: none on a line that has no
+/// operands (a label, a `proc near` header, a comment, a blank).
+pub fn caret_operand(line: &ida_proto::tags::Line, col: usize) -> Option<u32> {
+    if line.operands.is_empty() {
+        return None;
+    }
+    operand_at(&line.text, col)
+}
 
 /// The 0-based operand under byte column `col` of a listing line: the caret
 /// on the mnemonic (or before it) is operand 0, each comma starts the next
