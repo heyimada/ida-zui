@@ -84,3 +84,15 @@ auto_wait();
 ## Multiple databases
 
 A second `open_database` in the same process returns -1. Keep one host process per database.
+
+## Edit menu: works
+
+- **The SDK poisons more than printf.** `<fstream>` fails to compile together with the SDK headers (its file buffer needs `fgetc`/`fputc`). Use `qfopen`, `qfread`, `qfwrite`, `qfseek` and `qfclose` for files.
+- **`FF_BYTE`, `FF_WORD` and the other data type masks are `#undef`ed at the end of `bytes.hpp`.** Use `byte_flag()`, `word_flag()`, `dword_flag()`, `qword_flag()`, `oword_flag()`, `float_flag()`, `double_flag()` and `stru_flag()`; `create_data` takes those, and `create_data(ea, flag, count * elsize, tid)` makes an array.
+- **Operand representation:** `op_hex/op_dec/op_chr/op_bin/op_oct/op_num/op_enum/op_stkvar/clr_op_type` take `OPND_ALL`; `op_plain_offset` and `op_stroff` are looped over the decoded operands instead. Enum and struct paths take type ids (`get_named_type_tid`), and the further entries of a struct path are the ids of union members (`tinfo_t::get_udm_tid`). Negate and invert only have a toggle (`toggle_sign`, `toggle_bnot`), so check `is_invsign` / `is_bnot` first to offer a set. `K` after a numeric representation turns a stack operand back with `op_stkvar`; no `create_stkvar` is needed for an operand the analysis had already recognised.
+- **A plain offset (base 0) on a value that points nowhere in the database prints as the number.** `offset` only shows when the target exists; use a base that puts the target inside the image to see it.
+- **Reading a representation:** `is_defarg` is false for the default; the number base is `is_flag_for_operand(F, FF_N_NUMH / NUMD / NUMO / NUMB, n)`.
+- **Assembler:** `PH.assemble(buf, ea, cs, ip, use32, line)` works for the x86 module (`PR_ASSEMBLE` set). It writes nothing; patch the result with `patch_bytes`. The ARM module has no assembler, so test `PH.flag & PR_ASSEMBLE` and report that. A patched instruction must be re-created (`del_items` + `create_insn`) or the item keeps its old size; the same after `revert_byte` over code.
+- **Patch list:** `visit_patched_bytes(lo, hi, cb)` gives `(ea, file offset, original, patched)`; bytes patched to their own value are not reported. The file offset is -1 for bytes with no place in the input. Applying patches is a copy of the input plus one write per patched byte at that offset (the SDK has no headless "apply patches").
+- **Bookmarks:** `bookmarks_t::mark/get/find_index/size/erase` work headless with `ud = nullptr`, an `idaplace_t` entry and `TCCRT_FLAT`, are saved in the database, and are the disassembly view's own marks. There is no enumeration call: probe slots `0..MAX_MARK_SLOT` (stopping after `size()` hits). They raise no IDB notification, so the host reports a `display` change itself.
+- **Function properties:** `set_func_end` then `set_frame_size(pfn, locals, saved_regs, purged)` then assign `pfn->flags` and `update_func`. Re-fetch `pfn` after each step. `FUNC_USERFAR` must be set along with `FUNC_FAR`.

@@ -18,6 +18,7 @@ fn main() {
         .file("shim/shim.cpp")
         .file("shim/events.cpp")
         .file("shim/debug.cpp")
+        .file("shim/edit.cpp")
         .file("shim/pyexec.cpp")
         .file("shim/stdio.cpp")
         .file("shim/types.cpp")

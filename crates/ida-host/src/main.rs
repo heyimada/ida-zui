@@ -8,6 +8,17 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::FromRawHandle;
 
+/// `izs_edit_func`'s argument: -1 leaves a field alone. `flags` is noret, far,
+/// library, static, thunk, bp_frame, bp_bottom (0 clears, 1 sets).
+#[repr(C)]
+pub struct FuncEditC {
+    pub end: u64,
+    pub flags: [i8; 7],
+    pub locals: i64,
+    pub saved_regs: i64,
+    pub purged: i64,
+}
+
 mod ffi {
     use super::*;
     unsafe extern "C" {
@@ -104,6 +115,21 @@ mod ffi {
         pub fn izs_make_function(ea: Ea) -> i32;
         pub fn izs_delete_function(ea: Ea) -> i32;
         pub fn izs_toggle_collapse(ea: Ea) -> i32;
+        pub fn izs_set_op_repr(ea: Ea, op: i32, kind: i32, text: *const c_char, num: i64) -> i32;
+        pub fn izs_get_op_repr(ea: Ea) -> i32;
+        pub fn izs_array_defaults(ea: Ea) -> i32;
+        pub fn izs_make_array(ea: Ea, elem: i32, name: *const c_char, count: u32) -> i32;
+        pub fn izs_make_string_typed(ea: Ea, kind: i32, len: u32) -> i32;
+        pub fn izs_func_edit_info(ea: Ea) -> i32;
+        pub fn izs_edit_func(ea: Ea, edit: *const FuncEditC) -> i32;
+        pub fn izs_patch_bytes(ea: Ea, bytes: *const u8, len: usize) -> i32;
+        pub fn izs_assemble(ea: Ea, text: *const c_char, pad: bool) -> i32;
+        pub fn izs_revert_patches(ea: Ea, len: u64) -> i32;
+        pub fn izs_patch_list() -> i32;
+        pub fn izs_apply_patches(output: *const c_char) -> i32;
+        pub fn izs_mark_set(ea: Ea, desc: *const c_char) -> i32;
+        pub fn izs_mark_list() -> i32;
+        pub fn izs_mark_delete(slot: u32) -> i32;
         pub fn izs_plugin_list() -> i32;
         pub fn izs_plugin_run(which: *const c_char, arg: u64) -> i32;
         pub fn izs_sig_list() -> i32;
@@ -197,6 +223,23 @@ fn result(rc: i32) -> Result<String, String> {
 
 fn cstr(s: &str) -> Result<CString, String> {
     CString::new(s).map_err(|_| "string contains a NUL byte".to_owned())
+}
+
+/// Bytes from hex pairs; spaces and `0x` prefixes are allowed.
+fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
+    let digits: String = s
+        .split_whitespace()
+        .map(|t| t.strip_prefix("0x").unwrap_or(t))
+        .collect();
+    if digits.is_empty() || !digits.len().is_multiple_of(2) || !digits.is_ascii() {
+        return Err(format!("not a whole number of hex bytes: {s:?}"));
+    }
+    (0..digits.len() / 2)
+        .map(|i| {
+            u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16)
+                .map_err(|_| format!("bad hex byte in {s:?}"))
+        })
+        .collect()
 }
 
 /// Runs one request; returns the reply JSON or an error message.
@@ -415,6 +458,99 @@ fn dispatch(method: &str, params: &str) -> Result<String, String> {
             MakeFunction::NAME => ffi::izs_make_function(p::<MakeFunction>(params)?.ea),
             DeleteFunction::NAME => ffi::izs_delete_function(p::<DeleteFunction>(params)?.ea),
             ToggleCollapse::NAME => ffi::izs_toggle_collapse(p::<ToggleCollapse>(params)?.ea),
+            SetOpRepr::NAME => {
+                let m: SetOpRepr = p(params)?;
+                let op = m.op.map_or(-1, |o| o as i32);
+                let (kind, text, num) = match &m.repr {
+                    OpRepr::Hex => (0, String::new(), 0),
+                    OpRepr::Decimal => (1, String::new(), 0),
+                    OpRepr::Char => (2, String::new(), 0),
+                    OpRepr::Binary => (3, String::new(), 0),
+                    OpRepr::Octal => (4, String::new(), 0),
+                    OpRepr::Number => (5, String::new(), 0),
+                    OpRepr::Offset { base } => (6, String::new(), base.unwrap_or(0) as i64),
+                    OpRepr::OffsetSegment => (7, String::new(), 0),
+                    OpRepr::StructOffset { path, delta } => (
+                        8,
+                        path.join(
+                            "
+",
+                        ),
+                        *delta,
+                    ),
+                    OpRepr::Enum { name } => (9, name.clone(), 0),
+                    OpRepr::StackVar => (10, String::new(), 0),
+                    OpRepr::Negate { on } => (11, String::new(), *on as i64),
+                    OpRepr::Invert { on } => (12, String::new(), *on as i64),
+                    OpRepr::Clear => (13, String::new(), 0),
+                };
+                ffi::izs_set_op_repr(m.ea, op, kind, cstr(&text)?.as_ptr(), num)
+            }
+            GetOpRepr::NAME => ffi::izs_get_op_repr(p::<GetOpRepr>(params)?.ea),
+            ArrayDefaults::NAME => ffi::izs_array_defaults(p::<ArrayDefaults>(params)?.ea),
+            MakeArray::NAME => {
+                let m: MakeArray = p(params)?;
+                let (elem, name) = match &m.elem {
+                    ArrayElem::Byte => (0, ""),
+                    ArrayElem::Word => (1, ""),
+                    ArrayElem::Dword => (2, ""),
+                    ArrayElem::Qword => (3, ""),
+                    ArrayElem::Oword => (4, ""),
+                    ArrayElem::Float => (5, ""),
+                    ArrayElem::Double => (6, ""),
+                    ArrayElem::Struct { name } => (7, name.as_str()),
+                };
+                ffi::izs_make_array(m.ea, elem, cstr(name)?.as_ptr(), m.count)
+            }
+            MakeStringTyped::NAME => {
+                let m: MakeStringTyped = p(params)?;
+                ffi::izs_make_string_typed(m.ea, m.kind as i32, m.len)
+            }
+            FuncEditInfo::NAME => ffi::izs_func_edit_info(p::<FuncEditInfo>(params)?.ea),
+            EditFunc::NAME => {
+                let m: EditFunc = p(params)?;
+                let t = |v: Option<bool>| v.map_or(-1, |b| b as i8);
+                let e = m.edit;
+                let c = FuncEditC {
+                    end: e.end.unwrap_or(BADADDR),
+                    flags: [
+                        t(e.noret),
+                        t(e.far),
+                        t(e.library),
+                        t(e.static_def),
+                        t(e.thunk),
+                        t(e.bp_frame),
+                        t(e.bp_bottom),
+                    ],
+                    locals: e.locals.map_or(-1, |v| v as i64),
+                    saved_regs: e.saved_regs.map_or(-1, i64::from),
+                    purged: e.purged.map_or(-1, |v| v as i64),
+                };
+                ffi::izs_edit_func(m.ea, &c)
+            }
+            PatchBytes::NAME => {
+                let m: PatchBytes = p(params)?;
+                let bytes = parse_hex(&m.hex)?;
+                ffi::izs_patch_bytes(m.ea, bytes.as_ptr(), bytes.len())
+            }
+            Assemble::NAME => {
+                let m: Assemble = p(params)?;
+                ffi::izs_assemble(m.ea, cstr(&m.text)?.as_ptr(), m.pad)
+            }
+            RevertPatches::NAME => {
+                let m: RevertPatches = p(params)?;
+                ffi::izs_revert_patches(m.ea, m.len)
+            }
+            PatchList::NAME => ffi::izs_patch_list(),
+            ApplyPatches::NAME => {
+                ffi::izs_apply_patches(cstr(&p::<ApplyPatches>(params)?.output)?.as_ptr())
+            }
+            MarkSet::NAME => {
+                let m: MarkSet = p(params)?;
+                ffi::izs_mark_set(m.ea, cstr(&m.desc)?.as_ptr())
+            }
+            MarkList::NAME => ffi::izs_mark_list(),
+            MarkDelete::NAME => ffi::izs_mark_delete(p::<MarkDelete>(params)?.slot),
             Undo::NAME => ffi::izs_undo(),
             Redo::NAME => ffi::izs_redo(),
             PyEval::NAME => {

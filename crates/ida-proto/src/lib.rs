@@ -251,6 +251,230 @@ methods! {
     DbgEval = "dbg_eval" { expr: String } -> Ea;
     DbgExceptions = "dbg_exceptions" {} -> Vec<DbgException>;
     DbgSetException = "dbg_set_exception" { code: u32, stop: bool, pass: bool } -> Vec<DbgException>;
+
+    /// Sets how operand `op` (0-based; `None` = every operand) of the item at
+    /// `ea` is shown, like IDA's H, R, O, T, M, _, ~ and K keys.
+    SetOpRepr = "set_op_repr" { ea: Ea, op: Option<u32>, repr: OpRepr } -> ();
+    /// The representation of each operand of the item at `ea`, for check marks.
+    GetOpRepr = "get_op_repr" { ea: Ea } -> Vec<OpReprRow>;
+    /// What IDA's array dialog would offer at `ea`.
+    ArrayDefaults = "array_defaults" { ea: Ea } -> ArrayDefaultsReply;
+    /// Makes an array of `count` elements at `ea` (`*`), undefining what is in
+    /// the way.
+    MakeArray = "make_array" { ea: Ea, elem: ArrayElem, count: u32 } -> ();
+    /// `MakeString` with a string type (Alt+A). `len` 0 takes the string up
+    /// to its terminator; `MakeString` itself stays a plain C string.
+    MakeStringTyped = "make_string_typed" { ea: Ea, kind: StringKind, len: u32 } -> ();
+    /// Start, end, flags and frame sizes of the function containing `ea`.
+    FuncEditInfo = "func_edit_info" { ea: Ea } -> FuncEditInfoReply;
+    /// Changes the function containing `ea`; fields left `None` stay as they are.
+    EditFunc = "edit_func" { ea: Ea, edit: FuncEdit } -> ();
+    /// Patches bytes given as hex pairs; the originals are kept for
+    /// `revert_patches` and `apply_patches`. Returns how many were written.
+    PatchBytes = "patch_bytes" { ea: Ea, hex: String } -> u32;
+    /// Assembles one instruction and patches it in. With `pad`, a shorter
+    /// result is filled with `nop` up to the old instruction's size.
+    /// Fails when the processor module has no assembler.
+    Assemble = "assemble" { ea: Ea, text: String, pad: bool } -> AssembleReply;
+    /// Restores the original bytes of `[ea, ea + len)`; returns how many.
+    RevertPatches = "revert_patches" { ea: Ea, len: u64 } -> u32;
+    /// Every patched byte, in address order.
+    PatchList = "patch_list" {} -> Vec<PatchRow>;
+    /// Writes a copy of the input file with the patches applied to `output`.
+    /// The input file itself is never touched.
+    ApplyPatches = "apply_patches" { output: String } -> ApplyPatchesReply;
+    /// Marks `ea` with `desc` (replacing the mark already there) and returns
+    /// the slot used. Marks are IDA's own bookmarks of the disassembly view.
+    MarkSet = "mark_set" { ea: Ea, desc: String } -> u32;
+    MarkList = "mark_list" {} -> Vec<MarkRow>;
+    MarkDelete = "mark_delete" { slot: u32 } -> ();
+}
+
+/// A way to show an operand. Negation and inversion are set, not toggled.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OpRepr {
+    Hex,
+    Decimal,
+    Char,
+    Binary,
+    Octal,
+    /// The processor's default radix (IDA's `#`).
+    Number,
+    /// An offset from `base` (0 when `None`).
+    Offset {
+        base: Option<Ea>,
+    },
+    /// An offset from the base of the segment containing the item.
+    OffsetSegment,
+    /// `path[0]` is a struct or union name; each further name is a member of
+    /// the previous union that selects the branch.
+    StructOffset {
+        path: Vec<String>,
+        delta: i64,
+    },
+    Enum {
+        name: String,
+    },
+    StackVar,
+    Negate {
+        on: bool,
+    },
+    Invert {
+        on: bool,
+    },
+    /// Back to the default representation (also clears negation and inversion).
+    Clear,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpReprKind {
+    Default,
+    Hex,
+    Decimal,
+    Octal,
+    Binary,
+    Char,
+    Float,
+    Offset,
+    StructOffset,
+    Enum,
+    StackVar,
+    Segment,
+    Custom,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OpReprRow {
+    pub op: u32,
+    pub kind: OpReprKind,
+    pub negated: bool,
+    pub inverted: bool,
+    /// The enum name, the struct path (`A.b`) or the offset base, as text.
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ArrayElem {
+    Byte,
+    Word,
+    Dword,
+    Qword,
+    Oword,
+    Float,
+    Double,
+    Struct { name: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArrayDefaultsReply {
+    pub elem: ArrayElem,
+    pub elem_size: u32,
+    /// The current length of an array at `ea`, else all the room there is.
+    pub count: u32,
+    /// How many elements fit before the next defined item.
+    pub max_count: u32,
+    /// `ea` is already an array.
+    pub is_array: bool,
+}
+
+/// String types, as `STRTYPE_*`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StringKind {
+    /// Zero-terminated, 8-bit units.
+    #[default]
+    C,
+    /// Zero-terminated UTF-16.
+    C16,
+    /// Zero-terminated UTF-32.
+    C32,
+    /// One length byte.
+    Pascal,
+    Pascal16,
+    Pascal32,
+    /// Two-byte length.
+    Len2,
+    Len2x16,
+    Len2x32,
+    /// Four-byte length.
+    Len4,
+    Len4x16,
+    Len4x32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FuncEditInfoReply {
+    pub start: Ea,
+    pub end: Ea,
+    pub name: String,
+    pub noret: bool,
+    pub far: bool,
+    pub library: bool,
+    pub static_def: bool,
+    pub thunk: bool,
+    /// The function uses a frame pointer (BP).
+    pub bp_frame: bool,
+    /// BP points to the bottom of the frame.
+    pub bp_bottom: bool,
+    /// Bytes of local variables.
+    pub locals: u64,
+    /// Bytes of saved registers.
+    pub saved_regs: u32,
+    /// Bytes the function removes from the stack on return.
+    pub purged: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FuncEdit {
+    pub end: Option<Ea>,
+    pub noret: Option<bool>,
+    pub far: Option<bool>,
+    pub library: Option<bool>,
+    pub static_def: Option<bool>,
+    pub thunk: Option<bool>,
+    pub bp_frame: Option<bool>,
+    pub bp_bottom: Option<bool>,
+    pub locals: Option<u64>,
+    pub saved_regs: Option<u32>,
+    pub purged: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AssembleReply {
+    /// Everything written, hex pairs (the instruction plus any padding).
+    pub hex: String,
+    /// Size of the assembled instruction itself.
+    pub len: u32,
+    /// Size of the instruction it replaced.
+    pub old_len: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PatchRow {
+    pub ea: Ea,
+    pub original: u8,
+    pub patched: u8,
+    /// Offset in the input file, when the byte comes from it.
+    pub file_offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ApplyPatchesReply {
+    pub output: String,
+    /// Patched bytes written into the output.
+    pub written: u32,
+    /// Patched bytes with no place in the input file.
+    pub skipped: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MarkRow {
+    pub slot: u32,
+    pub ea: Ea,
+    pub desc: String,
 }
 
 /// `plugin_t::flags` bits, as `PLUGIN_*` in loader.hpp.
