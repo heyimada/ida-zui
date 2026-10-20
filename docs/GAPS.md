@@ -107,3 +107,17 @@ Nothing open: S1 to S4 are resolved (see Phase 8a below).
   - Mnemonic letters in dropdowns are chosen automatically (they work as keys).
   - Some Phase 2b unit tests were written alongside the code. This is a process note, not a product gap.
   - The open-with-options dialog opens metapc directly without a copy. That is intended behavior.
+
+## Left after the UX audits (docs/UX_AUDIT.md, docs/UX_REAUDIT.md)
+
+- **Tear-off by dragging:** a tab moves to its own window only from the menu, the palette or the tab context menu. gpui has no hook for a drop outside the window.
+- **Floating windows:**
+  - The struct-offset and enum choosers there skip the "no numeric operand" check.
+  - Marks, breakpoints, debugger keys and apply patches are wired up but no script exercises them in a floating window.
+  - A window saved on a monitor that is gone is moved to the primary display. Only unit tests cover this; no restart has been run with that monitor missing.
+- **Operand commands in pseudocode:** there are none. "Offset with base" also has no key.
+- **Hide casts:** `\` strips casts from a fresh decompile (`decompile_opts`). It is not Hex-Rays' own collapse, which needs a UI view.
+- **Toolbar jump field (P2):** kept as a mouse launcher for the same jump dialog that `G` opens. Both open one UI.
+- **Verified in code only:**
+  - L3, "unknown" calling conventions shown muted.
+  - R8, the Segment column hidden for binaries with a single segment.
