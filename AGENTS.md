@@ -18,7 +18,7 @@ Files in `crates/app`:
 | `panes.rs` | Pure tab-strip logic: reorder, which tab follows a close, next/previous. |
 | `nav_history.rs` | Pure back/forward history; one per pinned code tab. |
 | `workspace/tabs.rs` | Code tabs, the two panes, tab drag, persistence of open tabs per database. |
-| `workspace/floating.rs` | `FloatingWindow`: a code view in an OS window of its own over the shared session (own prompts, goto, context menu, status line); docking back on close; `FloatingWindows` registry used by the automation channel's `@<n>` prefix. |
+| `workspace/floating.rs` | `FloatingWindow`: a code view in an OS window of its own over the shared session (own prompts, goto, context menu, status line); docking back on close; `FloatingWindows` registry used by the automation channel's `@<n>` prefix; `Overlay`/`Inbox` carry what the workspace opens (modals, dialogs) for the window the command came from. |
 | `workspace.rs` | Root view: layout, modals, global actions. |
 | `listing.rs` | Linear disassembly, paged with `listing_up` / `listing_down`. |
 | `pseudo.rs` | Hex-Rays pseudocode. Clicks resolve through ctree anchors, not colors. |

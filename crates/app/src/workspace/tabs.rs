@@ -71,6 +71,7 @@ impl Workspace {
                         .unwrap_or_else(|| self.session.read(cx).cursor),
                     pinned: cv.pinned(cx),
                     right: self.right.contains(&d.id),
+                    float: None,
                 });
             }
         }
@@ -84,6 +85,18 @@ impl Workspace {
                     .unwrap_or_else(|| self.session.read(cx).cursor),
                 pinned: f.view.pinned(cx),
                 right: false,
+                float: f
+                    .window
+                    .update(cx, |_, w, _| {
+                        let b = w.bounds();
+                        [
+                            f32::from(b.origin.x),
+                            f32::from(b.origin.y),
+                            f32::from(b.size.width),
+                            f32::from(b.size.height),
+                        ]
+                    })
+                    .ok(),
             });
         }
         saved.left_front = self.doc.and_then(|id| index_of.get(&id).copied());
@@ -120,7 +133,32 @@ impl Workspace {
         self.doc = id_at(saved.left_front);
         self.right_front = id_at(saved.right_front).or_else(|| self.right.last().copied());
         self.focus_right = saved.focus_right && self.right_front.is_some();
+        // Torn-off views open as windows again, where they were.
+        for (t, id) in saved.tabs.iter().zip(&ids) {
+            if let (Some(f), Some(id)) = (t.float, id) {
+                let bounds = gpui::Bounds::new(
+                    gpui::point(gpui::px(f[0]), gpui::px(f[1])),
+                    gpui::size(gpui::px(f[2].max(360.)), gpui::px(f[3].max(240.))),
+                );
+                self.tear_off_at(*id, Some(bounds), window, cx);
+            }
+        }
         self.restoring_tabs = false;
+        // The status bar and the inspector show the tab that has the keyboard.
+        let front = if self.focus_right {
+            saved.right_front
+        } else {
+            saved.left_front
+        };
+        if let Some(t) = front.and_then(|i| saved.tabs.get(i))
+            && let Some(id) = self.focused_front().or(self.doc)
+            && let Some(DocView::Code(cv)) = self.docs.iter().find(|d| d.id == id).map(|d| &d.view)
+        {
+            let origin = cv.origin(cx);
+            let ea = t.ea;
+            self.session
+                .update(cx, |s, cx| s.set_cursor(ea, origin, cx));
+        }
         self.sync_views(cx);
         self.focus_main(window, cx);
         self.tabs_changed(cx);
@@ -267,6 +305,76 @@ impl Workspace {
                 self.open_in_right(kind, ea, false, window, cx);
             }
         }
+    }
+
+    /// The right-click menu of a tab.
+    pub(super) fn tab_menu(
+        &mut self,
+        id: u64,
+        pos: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::menubar::{Entry, run_entry};
+        let Some(d) = self.docs.iter().find(|d| d.id == id) else {
+            return;
+        };
+        let is_code = matches!(d.view, DocView::Code(_));
+        let title = match &d.view {
+            DocView::Code(cv) => self.code_tab_title(cv, cx),
+            _ => d.title.clone(),
+        };
+        let right = self.right.contains(&id);
+        let strip: Vec<u64> = self.strip(right).into_iter().flatten().collect();
+        let at = strip.iter().position(|&t| t == id).unwrap_or(0);
+        let others: Vec<u64> = strip.iter().copied().filter(|&t| t != id).collect();
+        let after: Vec<u64> = strip.iter().copied().skip(at + 1).collect();
+        let ws = cx.weak_entity();
+        let close_all = |ids: Vec<u64>, ws: gpui::WeakEntity<Workspace>| {
+            move |window: &mut Window, cx: &mut App| {
+                let _ = ws.update(cx, |w, cx| {
+                    for t in &ids {
+                        w.close_doc(*t, window, cx);
+                    }
+                });
+            }
+        };
+        let mut entries: Vec<Entry> = vec![
+            run_entry("Close", "", close_all(vec![id], ws.clone())),
+            run_entry("Close others", "", close_all(others.clone(), ws.clone())),
+            run_entry(
+                "Close to the right",
+                "",
+                close_all(after.clone(), ws.clone()),
+            ),
+            Entry::Sep,
+        ];
+        let w1 = ws.clone();
+        entries.push(run_entry(
+            "Move to other pane",
+            "",
+            move |window: &mut Window, cx: &mut App| {
+                let _ = w1.update(cx, |w, cx| w.move_tab(id, !right, None, window, cx));
+            },
+        ));
+        if is_code {
+            let w2 = ws.clone();
+            entries.push(run_entry(
+                "Move to new window",
+                "",
+                move |window: &mut Window, cx: &mut App| {
+                    let _ = w2.update(cx, |w, cx| w.tear_off(id, window, cx));
+                },
+            ));
+        }
+        entries.push(Entry::Sep);
+        let text = title.to_string();
+        entries.push(run_entry(
+            "Copy title",
+            "",
+            move |_: &mut Window, cx: &mut App| zui_editor::clipboard::write(text.clone(), cx),
+        ));
+        let session = self.session.clone();
+        crate::context_menu::show(&session, pos, title, entries, false, cx);
     }
 
     /// Ctrl+PgDn / Ctrl+PgUp: the next or previous tab of the focused pane.

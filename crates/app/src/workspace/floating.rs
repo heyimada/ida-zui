@@ -48,9 +48,71 @@ pub fn mark_input(window: &Window, cx: &mut App) {
 }
 
 /// What a modal in a floating window does with its answer.
-enum ModalKind {
+pub enum ModalKind {
     Prompt(SubmitFn),
     Goto,
+    /// A list whose rows act on their own (xrefs, structure choosers).
+    Pick,
+}
+
+/// Something the workspace opened for a floating window: shown there, not in the main window.
+pub enum Overlay {
+    Modal {
+        view: Entity<Modal>,
+        kind: ModalKind,
+        return_focus: Option<FocusHandle>,
+    },
+    Dialog {
+        view: gpui::AnyView,
+        focus: FocusHandle,
+        return_focus: Option<FocusHandle>,
+        sub: Subscription,
+    },
+    CloseDialog,
+}
+
+#[derive(Default)]
+pub struct Inbox(Vec<(gpui::WindowId, Overlay)>);
+
+impl Global for Inbox {}
+
+/// True when `window` is one of the floating windows.
+pub fn is_floating(window: &Window, cx: &App) -> bool {
+    let id = window.window_handle().window_id();
+    cx.try_global::<FloatingWindows>()
+        .is_some_and(|f| f.0.iter().any(|w| w.window_id() == id))
+}
+
+/// The floating window that last had input, if any.
+pub fn input_floating(cx: &App) -> Option<AnyWindowHandle> {
+    let id = cx.try_global::<InputWindow>().and_then(|w| w.0)?;
+    cx.try_global::<FloatingWindows>()?
+        .0
+        .iter()
+        .find(|w| w.window_id() == id)
+        .copied()
+}
+
+/// Hands `overlay` to the floating window `window` (it picks it up when it renders).
+pub fn push_overlay(window: &mut Window, overlay: Overlay, cx: &mut App) {
+    let id = window.window_handle().window_id();
+    cx.default_global::<Inbox>().0.push((id, overlay));
+    window.refresh();
+}
+
+/// A dialog shown in a floating window closed itself.
+pub fn dialog_closed(handle: AnyWindowHandle, cx: &mut App) {
+    cx.default_global::<Inbox>()
+        .0
+        .push((handle.window_id(), Overlay::CloseDialog));
+    // Fails while the window is being updated; it renders afterwards anyway.
+    let _ = handle.update(cx, |_, window, _| window.refresh());
+}
+
+struct ActiveDialog {
+    view: gpui::AnyView,
+    return_focus: Option<FocusHandle>,
+    _sub: Subscription,
 }
 
 struct OpenModal {
@@ -67,6 +129,7 @@ pub struct FloatingWindow {
     main: AnyWindowHandle,
     tab: u64,
     modal: Option<OpenModal>,
+    dialog: Option<ActiveDialog>,
     /// Context menus only; its commands run in this window.
     menubar: Entity<MenuBar>,
     focus: FocusHandle,
@@ -76,6 +139,17 @@ pub struct FloatingWindow {
 impl Workspace {
     /// Takes the tab out of the strip into a window of its own.
     pub(super) fn tear_off(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.tear_off_at(id, None, window, cx)
+    }
+
+    /// As `tear_off`, at saved bounds.
+    pub(super) fn tear_off_at(
+        &mut self,
+        id: u64,
+        bounds: Option<Bounds<gpui::Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(at) = self.docs.iter().position(|d| d.id == id) else {
             return;
         };
@@ -86,7 +160,7 @@ impl Workspace {
             return;
         };
         if let DocView::Code(view) = tab.view {
-            self.open_floating(id, view, window, cx);
+            self.open_floating(id, view, bounds, window, cx);
         }
     }
 
@@ -107,7 +181,7 @@ impl Workspace {
                 let view = CodeView::open(kind, &session, ea, false, cx);
                 let id = self.next_doc;
                 self.next_doc += 1;
-                self.open_floating(id, view, window, cx);
+                self.open_floating(id, view, None, window, cx);
             }
         }
     }
@@ -116,6 +190,7 @@ impl Workspace {
         &mut self,
         id: u64,
         view: CodeView,
+        bounds: Option<Bounds<gpui::Pixels>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -123,10 +198,12 @@ impl Workspace {
         let ws = cx.weak_entity();
         let main = window.window_handle();
         let at = window.bounds();
-        let bounds = Bounds::new(
-            at.origin + gpui::point(px(60.), px(60.)),
-            size(px(900.), px(700.)),
-        );
+        let bounds = bounds.unwrap_or_else(|| {
+            Bounds::new(
+                at.origin + gpui::point(px(60.), px(60.)),
+                size(px(900.), px(700.)),
+            )
+        });
         let automation = crate::automation::channel_path().is_some();
         let shown = view.clone();
         let opened = cx.open_window(
@@ -298,6 +375,7 @@ impl FloatingWindow {
             main,
             tab,
             modal: None,
+            dialog: None,
             menubar,
             focus,
             _subs: subs,
@@ -401,6 +479,16 @@ impl FloatingWindow {
         };
         match ev {
             ModalEvent::Dismiss => self.close_modal(window, cx),
+            ModalEvent::Pick(ChoiceValue::Run(f)) => {
+                let f = f.clone();
+                self.close_modal(window, cx);
+                f(cx);
+            }
+            ModalEvent::Pick(ChoiceValue::Action(action)) => {
+                let action = action.boxed_clone();
+                self.close_modal(window, cx);
+                window.dispatch_action(action, cx);
+            }
             ModalEvent::Pick(ChoiceValue::Ea(ea)) | ModalEvent::Pick(ChoiceValue::Mark(ea, _)) => {
                 let ea = *ea;
                 self.close_modal(window, cx);
@@ -418,10 +506,66 @@ impl FloatingWindow {
                         self.close_modal(window, cx);
                         self.session.update(cx, |s, cx| s.goto_expr(text, cx));
                     }
+                    ModalKind::Pick => {}
                 }
             }
             _ => {}
         }
+    }
+
+    /// Picks up what the workspace opened for this window.
+    fn take_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !cx.has_global::<Inbox>() {
+            return;
+        }
+        let id = window.window_handle().window_id();
+        let all = std::mem::take(&mut cx.global_mut::<Inbox>().0);
+        let (mine, rest): (Vec<_>, Vec<_>) = all.into_iter().partition(|(w, _)| *w == id);
+        cx.global_mut::<Inbox>().0 = rest;
+        for (_, overlay) in mine {
+            match overlay {
+                Overlay::Modal {
+                    view,
+                    kind,
+                    return_focus,
+                } => {
+                    let sub =
+                        cx.subscribe_in(&view, window, |this, _, ev: &ModalEvent, window, cx| {
+                            this.on_modal_event(ev, window, cx)
+                        });
+                    self.modal = Some(OpenModal {
+                        view,
+                        kind,
+                        return_focus,
+                        _sub: sub,
+                    });
+                }
+                Overlay::Dialog {
+                    view,
+                    focus,
+                    return_focus,
+                    sub,
+                } => {
+                    window.focus(&focus, cx);
+                    self.dialog = Some(ActiveDialog {
+                        view,
+                        return_focus,
+                        _sub: sub,
+                    });
+                }
+                Overlay::CloseDialog => self.close_dialog(window, cx),
+            }
+        }
+    }
+
+    fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(d) = self.dialog.take() {
+            match d.return_focus {
+                Some(f) => window.focus(&f, cx),
+                None => window.focus(&self.view_focus(cx), cx),
+            }
+        }
+        cx.notify();
     }
 
     fn goto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -485,6 +629,7 @@ impl Focusable for FloatingWindow {
 
 impl Render for FloatingWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.take_overlays(window, cx);
         let t = Theme::get(cx);
         let title = self.title(cx);
         window.set_window_title(&title);
@@ -570,6 +715,71 @@ impl Render for FloatingWindow {
             .on_action(cx.listener(|this, _: &OpInvert, _, cx| {
                 this.forward(cx, |w, cx| w.operand_flip(false, cx))
             }))
+            .on_action(cx.listener(|this, _: &OpOffsetBase, _, cx| {
+                this.forward(cx, |w, cx| w.operand_offset_base(cx))
+            }))
+            .on_action(cx.listener(|this, _: &OpStructOffset, window, cx| {
+                this.forward(cx, |w, cx| w.operand_type_chooser(false, window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &OpEnum, window, cx| {
+                this.forward(cx, |w, cx| w.operand_type_chooser(true, window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &OpStackVar, _, cx| {
+                this.forward(cx, |w, cx| w.set_operand(ida_proto::OpRepr::StackVar, cx))
+            }))
+            .on_action(cx.listener(|this, _: &SearchBytes, _, cx| {
+                this.forward(cx, |w, cx| w.search(true, cx))
+            }))
+            .on_action(cx.listener(|this, _: &SearchText, _, cx| {
+                this.forward(cx, |w, cx| w.search(false, cx))
+            }))
+            .on_action(cx.listener(|this, _: &SearchNextBytes, _, cx| {
+                this.forward(cx, |w, cx| w.search_next(true, cx))
+            }))
+            .on_action(cx.listener(|this, _: &SearchNextText, _, cx| {
+                this.forward(cx, |w, cx| w.search_next(false, cx))
+            }))
+            .on_action(cx.listener(|this, _: &SearchImmediate, _, cx| {
+                this.forward(cx, |w, cx| w.search_immediate(false, cx))
+            }))
+            .on_action(cx.listener(|this, _: &SearchNextImmediate, _, cx| {
+                this.forward(cx, |w, cx| w.search_immediate(true, cx))
+            }))
+            .on_action(cx.listener(|this, _: &SearchNextCode, _, cx| {
+                this.forward(cx, |w, cx| w.find_kind("code", "code", cx))
+            }))
+            .on_action(cx.listener(|this, _: &SearchNextData, _, cx| {
+                this.forward(cx, |w, cx| w.find_kind("data", "data", cx))
+            }))
+            .on_action(cx.listener(|this, _: &SearchNextUnexplored, _, cx| {
+                this.forward(cx, |w, cx| w.find_kind("unknown", "unexplored bytes", cx))
+            }))
+            .on_action(cx.listener(|this, _: &SearchNotFunction, _, cx| {
+                this.forward(cx, |w, cx| {
+                    w.find_kind("notfunc", "code outside a function", cx)
+                })
+            }))
+            .on_action(cx.listener(|this, _: &JumpToFunction, window, cx| {
+                this.forward(cx, |w, cx| w.jump_to_function(window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &DefineArray, window, cx| {
+                this.forward(cx, |w, cx| w.define_array(window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &SetStringType, window, cx| {
+                this.forward(cx, |w, cx| w.set_string_type(window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &EditFunctionProps, window, cx| {
+                this.forward(cx, |w, cx| w.edit_function(window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &PatchChangeBytes, window, cx| {
+                this.forward(cx, |w, cx| w.patch_change_bytes(window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &PatchAssemble, window, cx| {
+                this.forward(cx, |w, cx| w.patch_assemble(window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &PatchRevert, _, cx| {
+                this.forward(cx, |w, cx| w.patch_revert(cx))
+            }))
             .child(
                 div()
                     .flex_1()
@@ -601,6 +811,26 @@ impl Render for FloatingWindow {
                     .size_0()
                     .child(self.menubar.clone()),
             )
+            .when_some(self.dialog.as_ref(), |d, dialog| {
+                d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(hsla_a(t.scrim))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .py(px(24.))
+                        .child(
+                            div()
+                                .max_h_full()
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .child(dialog.view.clone()),
+                        ),
+                )
+            })
             .when_some(self.modal.as_ref(), |d, m| {
                 d.child(
                     div()

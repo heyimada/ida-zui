@@ -22,7 +22,15 @@ $steps = @(
     # next / previous tab, then the other pane
     "key:ctrl-pageup", "wait:1200", "shot:panes_prev_tab",
     "key:ctrl-pagedown", "wait:1200",
-    "action:ida::MoveToOtherPane", "wait:2000", "shot:panes_moved"
+    "action:ida::MoveToOtherPane", "wait:2000", "shot:panes_moved",
+    # the tab context menu
+    "rightclick:695,120", "wait:600", "shot:panes_tabmenu", "key:escape", "wait:300",
+    # drag a tab onto the other strip (it lands before the tab it is dropped on) ...
+    "drag:695,120,930,120", "wait:1500", "shot:panes_dragged",
+    # ... and reorder inside a strip (drop on the first tab: the dragged one goes before it)
+    "drag:1090,120,880,120", "wait:1500", "shot:panes_reordered",
+    # the divider moves with a drag (and the ratio is saved)
+    "drag:822,400,700,400", "wait:1000", "shot:panes_divider"
 )
 $global:LASTEXITCODE = 0
 & "$root\scripts\ui-capture.ps1" -Work $Work -Goto "FIND::Initialize" -Log panes -Steps $steps
@@ -30,6 +38,6 @@ $code = $LASTEXITCODE
 # Second start on the same settings (no --goto): the panes and the tabs come back
 # where they were.
 $global:LASTEXITCODE = 0
-& "$root\scripts\ui-capture.ps1" -Work $Work -Reuse -Log panes2 -Steps @("wait:9000", "shot:panes_restored")
+& "$root\scripts\ui-capture.ps1" -Work $Work -Reuse -Log panes2 -Steps @("wait:9000", "shot:panes_restored", "dblclick:700,400", "wait:800", "shot:panes_reset")
 if ($LASTEXITCODE -ne 0) { $code = 1 }
 exit $code

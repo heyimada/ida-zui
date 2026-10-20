@@ -85,7 +85,10 @@ pub fn start(path: PathBuf, handle: AnyWindowHandle, cx: &mut App) {
                 };
                 let ok = match target {
                     Some(h) => cx
-                        .update_window(h, |_, window, cx| run(&line, &done_path, window, cx))
+                        .update_window(h, |_, window, cx| {
+                            crate::workspace::mark_input(window, cx);
+                            run(&line, &done_path, window, cx)
+                        })
                         .unwrap_or(false),
                     None => false,
                 };

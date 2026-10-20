@@ -942,6 +942,12 @@ impl Workspace {
                 let drag_title = title.clone();
                 tab_base(("doc-tab", id).into(), on)
                     .on_click(cx.listener(move |w, _, window, cx| w.show_doc(id, window, cx)))
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(move |w, ev: &gpui::MouseDownEvent, _, cx| {
+                            w.tab_menu(id, ev.position, cx)
+                        }),
+                    )
                     .on_drag(
                         TabDrag {
                             id,
@@ -1582,7 +1588,19 @@ impl Workspace {
     ) -> gpui::Stateful<gpui::Div> {
         let h = div().id(id).absolute().on_mouse_down(
             gpui::MouseButton::Left,
-            cx.listener(move |w, _, _, cx| {
+            cx.listener(move |w, ev: &gpui::MouseDownEvent, _, cx| {
+                if which == Resize::Panes {
+                    if ev.click_count >= 2 {
+                        // Double click: back to half and half.
+                        w.pane_ratio = 0.5;
+                        w.save_layout(cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+                    w.pane_drag = Some((f32::from(ev.position.x), w.pane_ratio));
+                }
+                cx.stop_propagation();
                 w.resizing = Some(which);
                 cx.notify();
             }),
@@ -1599,6 +1617,12 @@ impl Workspace {
                 .bottom_0()
                 .left_0()
                 .w(px(4.))
+                .cursor(gpui::CursorStyle::ResizeLeftRight),
+            Resize::Panes => h
+                .top_0()
+                .bottom_0()
+                .left(px(-3.))
+                .w(px(6.))
                 .cursor(gpui::CursorStyle::ResizeLeftRight),
             Resize::Bottom => h
                 .left_0()

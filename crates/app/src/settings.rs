@@ -33,6 +33,8 @@ pub struct PanelLayout {
     pub sidebar_w: f32,
     pub inspector_w: f32,
     pub bottom_h: f32,
+    /// Share of the editor width the left pane takes when there are two.
+    pub pane_ratio: f32,
     /// Activity rail selection: `functions`, `names`, ...
     pub rail: String,
     /// `output`, `xrefs`, `python` or a debugger panel (`registers`, ...).
@@ -51,6 +53,7 @@ impl Default for PanelLayout {
             sidebar_w: 420.,
             inspector_w: 300.,
             bottom_h: 152.,
+            pane_ratio: 0.5,
             rail: "functions".to_owned(),
             bottom_tab: "xrefs".to_owned(),
             inspector_tab: "info".to_owned(),
@@ -60,7 +63,8 @@ impl Default for PanelLayout {
 
 impl PanelLayout {
     fn clamp(&mut self) {
-        self.sidebar_w = self.sidebar_w.clamp(200., 480.);
+        self.sidebar_w = self.sidebar_w.clamp(200., 640.);
+        self.pane_ratio = self.pane_ratio.clamp(0.15, 0.85);
         self.inspector_w = self.inspector_w.clamp(240., 480.);
         self.bottom_h = self.bottom_h.clamp(96., 600.);
     }
@@ -172,6 +176,8 @@ pub struct SavedTab {
     pub pinned: bool,
     /// In the right pane.
     pub right: bool,
+    /// Torn off into a window: x, y, width, height (logical pixels).
+    pub float: Option<[f32; 4]>,
 }
 
 /// The code tabs of a database and which are in front.

@@ -5,7 +5,7 @@ mod chrome;
 mod debug;
 mod edit;
 mod floating;
-pub use floating::FloatingWindows;
+pub use floating::{FloatingWindows, mark_input};
 mod tabs;
 use tabs as workspace_tabs;
 
@@ -66,6 +66,8 @@ pub enum Resize {
     Sidebar,
     Inspector,
     Bottom,
+    /// The divider between two code panes.
+    Panes,
 }
 
 struct OpenModal {
@@ -104,6 +106,10 @@ pub struct Workspace {
     sidebar_w: f32,
     inspector_w: f32,
     bottom_h: f32,
+    /// Share of the editor width the left pane takes (two panes).
+    pane_ratio: f32,
+    /// Where a divider drag started: pointer x and the ratio then.
+    pane_drag: Option<(f32, f32)>,
     resizing: Option<Resize>,
     modal: Option<OpenModal>,
     close_confirmed: bool,
@@ -177,6 +183,8 @@ impl Workspace {
             sidebar_w: layout.sidebar_w,
             inspector_w: layout.inspector_w,
             bottom_h: layout.bottom_h,
+            pane_ratio: layout.pane_ratio,
+            pane_drag: None,
             resizing: None,
             modal: None,
             close_confirmed: false,
@@ -299,9 +307,17 @@ impl Workspace {
                     req.repeatable,
                     req.text.clone(),
                 );
-                let dialog = cx
-                    .new(|cx| crate::edit_dialogs::CommentDialog::new(session, ea, rep, &text, cx));
-                self.show_dialog(dialog, window, cx);
+                let open = move |w: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                    let dialog = cx.new(|cx| {
+                        crate::edit_dialogs::CommentDialog::new(session, ea, rep, &text, cx)
+                    });
+                    w.show_dialog(dialog, window, cx);
+                };
+                // In the window the user is working in.
+                match floating::input_floating(cx) {
+                    Some(h) => self.in_window(h, open, cx),
+                    None => open(self, window, cx),
+                }
             }
             SessionEvent::ContextMenu(req) if active && !floating::input_is_floating(cx) => {
                 let (pos, title, entries, keyboard) = (
@@ -331,9 +347,23 @@ impl Workspace {
                     cx,
                 );
             }
-            SessionEvent::ShowXrefs { ea, to } if active => self.show_xrefs(*ea, *to, window, cx),
+            SessionEvent::ShowXrefs { ea, to } if active => {
+                let (ea, to) = (*ea, *to);
+                match floating::input_floating(cx) {
+                    Some(h) => self.in_window(h, move |w, fw, cx| w.show_xrefs(ea, to, fw, cx), cx),
+                    None => self.show_xrefs(ea, to, window, cx),
+                }
+            }
             SessionEvent::ShowXrefList { title, rows } if active => {
-                self.show_xref_list(title.clone(), rows.clone(), window, cx)
+                let (title, rows) = (title.clone(), rows.clone());
+                match floating::input_floating(cx) {
+                    Some(h) => self.in_window(
+                        h,
+                        move |w, fw, cx| w.show_xref_list(title, rows, fw, cx),
+                        cx,
+                    ),
+                    None => self.show_xref_list(title, rows, window, cx),
+                }
             }
             SessionEvent::OpenDoc(key) if active => self.open_doc(key.clone(), window, cx),
             SessionEvent::OpenCodeTab { kind, ea } if active => {
@@ -419,7 +449,12 @@ impl Workspace {
             self.show_inspector,
             self.show_bottom,
         );
-        let (sidebar_w, inspector_w, bottom_h) = (self.sidebar_w, self.inspector_w, self.bottom_h);
+        let (sidebar_w, inspector_w, bottom_h, pane_ratio) = (
+            self.sidebar_w,
+            self.inspector_w,
+            self.bottom_h,
+            self.pane_ratio,
+        );
         settings::update(cx, move |s| {
             s.layout = settings::PanelLayout {
                 sidebar,
@@ -429,6 +464,7 @@ impl Workspace {
                 sidebar_w,
                 inspector_w,
                 bottom_h,
+                pane_ratio,
                 rail,
                 bottom_tab,
                 inspector_tab,
@@ -1339,6 +1375,8 @@ impl Workspace {
     /// .i64), then removes the window once they have acknowledged. Returns
     /// true only when there is nothing to wait for.
     pub fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // The windows torn off are where they are now.
+        self.save_tabs(cx);
         if self.close_confirmed || self.dbs.iter().all(|d| d.session.read(cx).client_is_none()) {
             return true;
         }
@@ -1463,6 +1501,26 @@ impl Workspace {
             .as_ref()
             .and_then(|d| d.return_focus.clone())
             .or_else(|| window.focused(cx));
+        if floating::is_floating(window, cx) {
+            let handle = window.window_handle();
+            let sub = cx.subscribe(&view, move |_, _, ev: &DialogEvent, cx| {
+                if matches!(ev, DialogEvent::Close) {
+                    floating::dialog_closed(handle, cx);
+                }
+            });
+            let focus = view.read(cx).focus_handle(cx);
+            floating::push_overlay(
+                window,
+                floating::Overlay::Dialog {
+                    view: view.into(),
+                    focus,
+                    return_focus,
+                    sub,
+                },
+                cx,
+            );
+            return;
+        }
         let sub = cx.subscribe_in(&view, window, |this, _, ev: &DialogEvent, window, cx| {
             this.on_dialog_event(ev, window, cx)
         });
@@ -1679,6 +1737,31 @@ impl Workspace {
     // ---- overlays ------------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
+    /// Input in this window: it is where prompts open, and its front view drives the session.
+    fn take_input(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let from_floating = floating::input_is_floating(cx);
+        floating::mark_input(window, cx);
+        if from_floating {
+            self.sync_views(cx);
+        }
+    }
+
+    /// Runs `f` with another window of the app as `window` (after the current
+    /// update): what the workspace opens then belongs to that window.
+    fn in_window(
+        &mut self,
+        handle: gpui::AnyWindowHandle,
+        f: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let ws = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = ws.update(cx, |w, cx| f(w, window, cx));
+            });
+        });
+    }
+
     fn open_modal(
         &mut self,
         title: impl Into<SharedString>,
@@ -1706,6 +1789,24 @@ impl Workspace {
                 cx,
             )
         });
+        if floating::is_floating(window, cx) {
+            // Asked for by a command typed in a floating window: it opens there.
+            let kind = match kind {
+                ModalKind::Prompt(f) => floating::ModalKind::Prompt(f),
+                ModalKind::Goto => floating::ModalKind::Goto,
+                ModalKind::Pick | ModalKind::Attach => floating::ModalKind::Pick,
+            };
+            floating::push_overlay(
+                window,
+                floating::Overlay::Modal {
+                    view: view.clone(),
+                    kind,
+                    return_focus,
+                },
+                cx,
+            );
+            return view;
+        }
         let sub = cx.subscribe_in(&view, window, |this, _, ev: &ModalEvent, window, cx| {
             this.on_modal_event(ev, window, cx)
         });
@@ -2290,6 +2391,7 @@ impl Workspace {
         self.sidebar_w = d.sidebar_w;
         self.inspector_w = d.inspector_w;
         self.bottom_h = d.bottom_h;
+        self.pane_ratio = d.pane_ratio;
         self.sidebar
             .update(cx, |s, cx| s.select_tab(Tab::from_key(&d.rail), cx));
         self.inspector
@@ -2382,12 +2484,21 @@ impl Workspace {
                 .child(column(false, self, cx))
                 .into_any_element();
         }
+        let ratio = self.pane_ratio;
         div()
             .flex_1()
             .min_h_0()
             .flex()
-            .child(column(false, self, cx))
-            .child(column(true, self, cx))
+            .child(
+                column(false, self, cx)
+                    .flex_none()
+                    .flex_basis(gpui::relative(ratio)),
+            )
+            .child(column(true, self, cx).relative().child(self.resize_handle(
+                "resize-panes",
+                Resize::Panes,
+                cx,
+            )))
             .into_any_element()
     }
 
@@ -2457,7 +2568,19 @@ impl Workspace {
         let size = window.viewport_size();
         let (x, y) = (f32::from(position.x), f32::from(position.y));
         match which {
-            Resize::Sidebar => self.sidebar_w = (x - RAIL_W).clamp(200., 480.),
+            Resize::Sidebar => self.sidebar_w = (x - RAIL_W).clamp(200., 640.),
+            Resize::Panes => {
+                if let Some((x0, r0)) = self.pane_drag {
+                    let mut avail = f32::from(size.width) - RAIL_W;
+                    if self.show_sidebar {
+                        avail -= self.sidebar_w;
+                    }
+                    if self.show_inspector {
+                        avail -= self.inspector_w;
+                    }
+                    self.pane_ratio = (r0 + (x - x0) / avail.max(200.)).clamp(0.15, 0.85);
+                }
+            }
             Resize::Inspector => self.inspector_w = (f32::from(size.width) - x).clamp(240., 480.),
             Resize::Bottom => {
                 let body =
@@ -2533,6 +2656,8 @@ impl Render for Workspace {
             .font_family(UI_FONT)
             .text_size(px(12.))
             .line_height(px(16.))
+            .capture_any_mouse_down(cx.listener(|w, _, window, cx| w.take_input(window, cx)))
+            .on_key_down(cx.listener(|w, _, window, cx| w.take_input(window, cx)))
             .on_mouse_move(cx.listener(|w, ev: &gpui::MouseMoveEvent, window, cx| {
                 if w.resizing.is_some() {
                     if ev.pressed_button == Some(gpui::MouseButton::Left) {
@@ -2547,6 +2672,7 @@ impl Render for Workspace {
                 gpui::MouseButton::Left,
                 cx.listener(|w, _, _, cx| {
                     if w.resizing.take().is_some() {
+                        w.pane_drag = None;
                         w.save_layout(cx);
                     }
                 }),

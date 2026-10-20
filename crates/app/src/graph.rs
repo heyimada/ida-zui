@@ -144,6 +144,10 @@ pub struct GraphView {
     sel_block: usize,
     /// The (block, line) a mouse drag selection started on.
     drag_sel: Option<(usize, usize)>,
+    /// How far the pointer is past the canvas edge while selecting (x, y), and where it is.
+    auto_vec: (f32, f32),
+    auto_running: bool,
+    last_pointer: Point<Pixels>,
     _subs: Vec<Subscription>,
 }
 
@@ -217,6 +221,9 @@ impl GraphView {
             sel: Anchor::default(),
             sel_block: 0,
             drag_sel: None,
+            auto_vec: (0., 0.),
+            auto_running: false,
+            last_pointer: point(px(0.), px(0.)),
             _subs: vec![sub],
         }
     }
@@ -556,24 +563,104 @@ impl GraphView {
         cx.notify();
     }
 
+    /// Extends the drag selection to the line under `p`, clamped to the block
+    /// it started in (past its top or bottom: the first or last line).
+    fn extend_drag_selection(&mut self, p: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some((sb, sl)) = self.drag_sel else {
+            return;
+        };
+        let (Some((gx, gy)), Some(r), Some(block)) = (
+            self.to_graph(p),
+            self.layout.nodes.get(sb).copied(),
+            self.blocks.get(sb),
+        ) else {
+            return;
+        };
+        let last = block.lines.len().saturating_sub(1);
+        let li = (((gy - r.y - HEAD - PAD) / lh()).floor().max(0.) as usize).min(last);
+        let col = ((gx - r.x - PAD) / self.char_w).max(0.) as usize;
+        let col = block.lines.get(li).map_or(0, |(_, line)| {
+            line.text
+                .char_indices()
+                .nth(col)
+                .map(|(i, _)| i)
+                .unwrap_or(line.text.len())
+        });
+        if self.cursor != Some((sb, li)) {
+            self.sel_block = sb;
+            self.sel.begin(sl);
+            self.cursor = Some((sb, li));
+            self.caret_col = col;
+            if let Some(ea) = self.cursor_ea() {
+                self.session
+                    .update(cx, |s, cx| s.set_cursor(ea, self.origin, cx));
+            }
+            self.publish_caret(cx);
+            cx.notify();
+        }
+    }
+
+    /// Past the edge of the canvas with the button down: the graph pans, and
+    /// the selection follows, until the button is released.
+    fn start_autoscroll(&mut self, cx: &mut Context<Self>) {
+        if self.auto_running {
+            return;
+        }
+        self.auto_running = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(30))
+                    .await;
+                let go = this
+                    .update(cx, |v, cx| {
+                        let (dx, dy) = v.auto_vec;
+                        if v.drag_sel.is_none() || (dx == 0. && dy == 0.) {
+                            v.auto_running = false;
+                            return false;
+                        }
+                        // The farther past the edge, the faster; the content moves against the pointer.
+                        v.pan.x -= px((dx * 0.3).clamp(-30., 30.));
+                        v.pan.y -= px((dy * 0.3).clamp(-30., 30.));
+                        let at = v.last_pointer;
+                        v.extend_drag_selection(at, cx);
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !go {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some((sb, sl)) = self.drag_sel {
+        if self.drag_sel.is_some() {
             if ev.pressed_button != Some(MouseButton::Left) {
                 self.drag_sel = None;
-            } else if let Some((b, l, col)) = self.hit(ev.position)
-                && b == sb
-                && self.cursor != Some((b, l))
-            {
-                self.sel_block = b;
-                self.sel.begin(sl);
-                self.cursor = Some((b, l));
-                self.caret_col = col;
-                if let Some(ea) = self.cursor_ea() {
-                    self.session
-                        .update(cx, |s, cx| s.set_cursor(ea, self.origin, cx));
+            } else {
+                self.last_pointer = ev.position;
+                self.extend_drag_selection(ev.position, cx);
+                if let Some(b) = self.bounds {
+                    let past = |v: Pixels, lo: Pixels, hi: Pixels| {
+                        if v < lo {
+                            f32::from(v - lo)
+                        } else if v > hi {
+                            f32::from(v - hi)
+                        } else {
+                            0.
+                        }
+                    };
+                    self.auto_vec = (
+                        past(ev.position.x, b.left(), b.right()),
+                        past(ev.position.y, b.top(), b.bottom()),
+                    );
+                    if self.auto_vec != (0., 0.) {
+                        self.start_autoscroll(cx);
+                    }
                 }
-                self.publish_caret(cx);
-                cx.notify();
             }
         }
         if let Some((start, pan)) = self.drag {
@@ -896,6 +983,16 @@ impl GraphView {
                 let theme = Theme::get(cx);
                 let cw = f32::from(code::char_width(window));
                 let v = entity.read(cx);
+                if v.drag_sel.is_some() {
+                    // The element only hears moves over itself; a drag that leaves the
+                    // canvas (to autoscroll) needs them everywhere.
+                    let e = entity.clone();
+                    window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
+                        if phase == gpui::DispatchPhase::Bubble {
+                            e.update(cx, |v, cx| v.on_mouse_move(ev, window, cx));
+                        }
+                    });
+                }
                 let zoom = v.zoom;
                 let pan = v.pan;
                 let layout = v.layout.clone();

@@ -120,7 +120,7 @@ public static class Win {
     }, IntPtr.Zero);
     return found;
   }
-  // The visible top-level windows of the process other than `skip` (the floating windows), by handle, which grows with age.
+  // The visible top-level windows of the process other than `skip` (the floating windows), by handle (the newest window has the lowest here).
   public static IntPtr[] FindOtherWindows(uint pid, IntPtr skip) {
     var list = new System.Collections.Generic.List<IntPtr>();
     EnumWindows((h, p) => {
@@ -130,7 +130,7 @@ public static class Win {
       if (sb.ToString() == "ConsoleWindowClass") return true;
       list.Add(h); return true;
     }, IntPtr.Zero);
-    list.Sort((a, b) => a.ToInt64().CompareTo(b.ToInt64()));
+    list.Sort((a, b) => b.ToInt64().CompareTo(a.ToInt64()));
     return list.ToArray();
   }
   public static IntPtr FindAppWindow(uint pid) {
