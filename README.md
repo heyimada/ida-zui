@@ -69,22 +69,28 @@ Without the SDK you can still build and test the UI side: `cargo build -p ida-zu
 
 ## Coming from IDA
 
-The defaults follow IDA's `cfg/idagui.cfg` where IDA has a key. Every key is editable (Settings > Keyboard) and every command is in the menus and the palette (`Ctrl+Shift+P`).
+The defaults follow IDA's `cfg/idagui.cfg` where IDA has a key. Every key is editable (Settings > Keyboard) and every command is in the menus and the palette (`Ctrl+Shift+P`). The same table is in the app under `Help > Coming from IDA`.
 
 | Action | IDA | ida-zui |
 |---|---|---|
-| Jump to address / name | `G` | `G`, `Ctrl+P` (fuzzy palette) |
+| Jump to address / name | `G` | `G` (fuzzy over functions and names) |
+| Jump to function / segment / entry point | `Ctrl+P` / `Ctrl+S` / `Ctrl+E` | `Ctrl+P` / `Ctrl+Alt+S` / `Ctrl+E` (`Ctrl+S` saves here) |
+| Next / previous function | `Ctrl+Down` / `Ctrl+Up` | same |
 | Back / forward | `Esc` / `Ctrl+Enter` | same (plus `Alt+Left` / `Alt+Right`) |
 | Follow | `Enter` | `Enter`, double-click (on a mnemonic it follows the first name of the line) |
 | Xrefs to / from | `X`, `Ctrl+X` / `Ctrl+J` | same (plus `Shift+X` for from) |
 | Rename | `N` | `N` |
-| Comment / repeatable comment | `:` / `;` | same (`:` works on any keyboard layout) |
+| Comment / repeatable comment | `:` / `;` | same (`:` works on any keyboard layout; `/` in pseudocode too) |
 | Graph / linear | `Space` | `Space` |
-| Pseudocode | `F5`, `Tab` | `F5`, `Tab` |
+| Pseudocode | `F5`, `Tab` | `F5`, `Tab` (`Tab` again returns) |
 | Search text / bytes, again | `Alt+T` / `Alt+B`, `Ctrl+T` / `Ctrl+B` | same |
+| Search immediate value, again | `Alt+I`, `Ctrl+I` | same |
+| Next code / data / unexplored | `Alt+C` / `Ctrl+D` / `Ctrl+U` | same |
+| Next code outside a function | `Alt+U` | `Alt+U` |
 | Functions / Names / Strings / Segments | `Shift+F3` / `Shift+F4` / `Shift+F12` / `Shift+F7` | same (side panel tabs) |
 | Local types / Signatures | `Shift+F1` / `Shift+F5` | same |
 | Code / data / string / undefine / function | `C` `D` `A` `U` `P` | same |
+| Save database | `Ctrl+W` | `Ctrl+W` (`Ctrl+S` too); close database is `Ctrl+Shift+W` |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Shift+Z` | same (`Ctrl+Y` too) |
 | Debugger | `F9` `F7` `F8` `F2` `Ctrl+F2` `F4` | same |
 
@@ -130,7 +136,7 @@ Top to bottom: title strip (the product glyph, then one chip per open database),
 - **Inspector:** Info (function facts, prototype, xrefs, callees; in graph view the basic block, its successors, predecessors and calls), Type, Xrefs and Comments.
 - **Bottom panel:** Output, live Xrefs to the name under the caret (click a row to jump) and a Python tab with the IDAPython console (below).
 - Panels toggle from the toolbar and the View menu (`Ctrl+Alt+I` inspector, `Ctrl+Alt+J` bottom panel) and drag to resize; sizes, visibility and the split are remembered in `settings.json`.
-- The graph has a header strip (zoom controls, edge legend, minimap toggle) and a bottom-right minimap (click to pan; `View > Graph minimap`). Blocks drop the indent their instructions share. The palette groups results with kind badges and highlights the matched text. The themes are Dark and Light (plus High contrast and IDA Classic); IBM Plex Sans is bundled.
+- The graph has a header strip (zoom controls, edge legend, minimap toggle) and a bottom-right minimap (click to pan; `View > Graph > Minimap`). Blocks drop the indent their instructions share. The palette groups results with kind badges and highlights the matched text. The themes are Dark and Light (plus High contrast and IDA Classic); IBM Plex Sans is bundled.
 
 ## Debugger
 
@@ -155,7 +161,7 @@ Top to bottom: title strip (the product glyph, then one chip per open database),
 
 ## Python console and scripts
 
-The bottom panel's **Python** tab (`View > Python console`) is an IDAPython REPL running in the database's host. The input is the multi-line code editor with the Python highlighter: **Enter** runs the statement once it is complete (Python's own `codeop` decides, so an open block or bracket continues on the next line and a block ends with a blank line, as in IDA's console), **Shift+Enter** adds a line, **Ctrl+Enter** runs whatever is there, **Up / Down** on the first / last line walk the history (the half-typed text comes back). Statements run in `__main__`, the value of a trailing expression is printed, and `idc.here()` / `ida_kernwin.get_screen_ea()` are the address under the UI cursor. Output is coloured by stream (stdout, stderr, expression values, tracebacks, which show the source line). History (500 entries, adjustable in Settings > Python) is kept in `python_history.json` next to `settings.json`.
+The bottom panel's **Python** tab (`View > Open subviews > Python console`) is an IDAPython REPL running in the database's host. The input is the multi-line code editor with the Python highlighter: **Enter** runs the statement once it is complete (Python's own `codeop` decides, so an open block or bracket continues on the next line and a block ends with a blank line, as in IDA's console), **Shift+Enter** adds a line, **Ctrl+Enter** runs whatever is there, **Up / Down** on the first / last line walk the history (the half-typed text comes back). Statements run in `__main__`, the value of a trailing expression is printed, and `idc.here()` / `ida_kernwin.get_screen_ea()` are the address under the UI cursor. Output is coloured by stream (stdout, stderr, expression values, tracebacks, which show the source line). History (500 entries, adjustable in Settings > Python) is kept in `python_history.json` next to `settings.json`.
 
 While a script runs the host cannot answer other requests, so the console shows a *Running* strip with elapsed time and **Cancel**, which raises `KeyboardInterrupt` in the script (a script stuck in a long C call or `time.sleep` stops when that call returns; about 4 s after Cancel a **Kill host...** button appears, which asks twice because unsaved changes are lost). A script's changes reach the views through `db_changed` events once it returns; edits made from Python show in the listing, lists and inspector without a manual refresh. One undo reverts a whole script run. `File > Script file...` (`Alt+F7`) runs a `.py` file. The **Python / IDC** button in the panel header switches the input language: IDC runs through IDA's own evaluator (an expression prints its value; statements such as `auto x = 5; Message("hi");` run as a snippet; errors come back as `IDC: ...`).
 
@@ -173,7 +179,15 @@ The window has a menu bar (File, Edit, Jump, Search, View, Options, Windows,
 Help; the Debugger menu is described under Debugger). Click a title, hover to
 switch menus, use the arrow keys and Enter, press `Alt` or `F10` to focus the
 bar, or `Alt+F/E/J/S/V/O/W/H` to open a menu. Shortcuts shown in the menus come
-from the live keymap. Every command is also in the command palette.
+from the live keymap. Every command is also in the command palette. The menus
+follow IDA's split: **View** holds the main views, `Open subviews` (every list
+and editor once), `Toolbars and panels` and `Graph`; **Windows** holds the
+database tabs, `Close editor tab` and `Reset layout` (panel sizes, visibility
+and the split back to their defaults); **Jump** and **Search** carry the
+choosers and searches above. Underlined letters are menu mnemonics (a label can
+mark its own with `&` in `menubar.rs`). `Help` has `Documentation` and
+`Report an issue` (they open the GitHub pages in your browser), `Coming from
+IDA`, the shortcut list and `About`.
 
 `Options > Settings...` (`Ctrl+,`) holds the theme (Dark, Light, High contrast,
 IDA Classic), the code font and size, the UI font size and the keyboard
@@ -192,7 +206,11 @@ IDA's defaults are used where IDA has one.
 
 | Key | Action |
 |---|---|
-| `G` / `Ctrl+P` | Jump to an address, name or expression (fuzzy over functions and names) |
+| `G` | Jump to an address, name or expression (fuzzy over functions and names) |
+| `Ctrl+P` / `Ctrl+Alt+S` / `Ctrl+E` | Jump to function / segment (choosers) / entry point |
+| `Ctrl+Down` / `Ctrl+Up` | Next / previous function |
+| `Alt+I` / `Ctrl+I` | Search an immediate value (a number), then again |
+| `Alt+C` / `Ctrl+D` / `Ctrl+U` / `Alt+U` | Next code / data / unexplored / code outside a function |
 | `Esc` / `Alt+←`, `Ctrl+Enter` / `Alt+→` | Back, forward |
 | `Enter`, double-click | Follow the name under the caret, or expand a collapsed item |
 | `Space` | Toggle between linear and graph view |

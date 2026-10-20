@@ -249,6 +249,7 @@ impl Workspace {
             bottom,
             goto_choices: None,
             last_search: None,
+            last_imm: None,
             pending_goto: None,
             chip: (TabKind::Empty, false, 0),
             _subs: vec![sub, observe, inspector_sub, bottom_sub],
@@ -839,11 +840,15 @@ impl Workspace {
                                 keywords: SharedString::default(),
                             })
                             .collect();
-                        let title = if enums {
-                            "Open an enum"
-                        } else {
-                            "Open a structure or union"
-                        };
+                        let title = format!(
+                            "{} ({})",
+                            if enums {
+                                "Open an enum"
+                            } else {
+                                "Open a structure or union"
+                            },
+                            choices.len()
+                        );
                         w.open_modal(
                             title,
                             "",
@@ -1672,7 +1677,9 @@ impl Workspace {
                     ModalKind::Prompt(f) => {
                         let f = f.clone();
                         self.close_modal(window, cx);
-                        f(text, cx);
+                        // The callback may update the workspace (search does):
+                        // not while this event is still being handled.
+                        cx.defer(move |cx| f(text, cx));
                     }
                     ModalKind::Goto => {
                         self.close_modal(window, cx);
@@ -1823,9 +1830,13 @@ impl Workspace {
                         )
                     }),
                     Ok(rows) => {
+                        let n = rows.len();
                         let choices = rows.into_iter().map(|x| Self::xref_choice(x, to)).collect();
-                        let title =
-                            format!("Cross references {} {ea:X}", if to { "to" } else { "from" });
+                        let title = format!(
+                            "Xrefs {} {} ({n})",
+                            if to { "to" } else { "from" },
+                            w.session.read(cx).symbol_at(ea)
+                        );
                         w.open_modal(
                             title,
                             "",
@@ -1864,6 +1875,7 @@ impl Workspace {
             });
             return;
         }
+        let title = format!("{title} ({})", rows.len());
         let choices = rows
             .into_iter()
             .map(|x| Self::xref_choice(x, true))
@@ -1949,6 +1961,247 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// Search > Next code / data / unexplored / outside a function.
+    fn find_kind(&mut self, kind: &'static str, what: &'static str, cx: &mut Context<Self>) {
+        let session = self.session.clone();
+        let fut = session.read(cx).call(ida_proto::FindKind {
+            ea: session.read(cx).cursor,
+            kind: kind.into(),
+            forward: true,
+        });
+        cx.spawn(async move |_, cx| {
+            let r = fut.await;
+            session.update(cx, |s, cx| match r {
+                Ok(Some(ea)) => s.navigate(ea, cx),
+                Ok(None) => s.info_msg(format!("No {what} below the cursor"), cx),
+                Err(e) => s.error(e.to_string(), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Alt+I / Ctrl+I: asks for a number (the last one prefilled), or repeats it.
+    fn search_immediate(&mut self, again: bool, cx: &mut Context<Self>) {
+        if again && let Some(value) = self.last_imm {
+            return self.run_immediate(value, cx);
+        }
+        let initial = self.last_imm.map(|v| format!("{v:#x}")).unwrap_or_default();
+        let ws = cx.entity().downgrade();
+        let session = self.session.clone();
+        session.update(cx, |s, cx| {
+            s.prompt(
+                "Search immediate value (e.g. 0x28, 40, 28h, -1)",
+                initial,
+                move |q, cx| {
+                    ws.update(cx, |w, cx| match crate::jumps::parse_immediate(&q) {
+                        Some(value) => {
+                            w.last_imm = Some(value);
+                            w.run_immediate(value, cx);
+                        }
+                        None => w
+                            .session
+                            .update(cx, |s, cx| s.error(format!("'{q}' is not a number"), cx)),
+                    })
+                    .ok();
+                },
+                cx,
+            )
+        });
+    }
+
+    fn run_immediate(&mut self, value: u64, cx: &mut Context<Self>) {
+        let session = self.session.clone();
+        let fut = session.read(cx).call(ida_proto::FindImm {
+            ea: session.read(cx).cursor,
+            value,
+            forward: true,
+        });
+        cx.spawn(async move |_, cx| {
+            let r = fut.await;
+            session.update(cx, |s, cx| match r {
+                Ok(Some(ea)) => s.navigate(ea, cx),
+                Ok(None) => s.info_msg(format!("{value:#x} not found below the cursor"), cx),
+                Err(e) => s.error(e.to_string(), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Ctrl+Down / Ctrl+Up: the next or previous function start.
+    fn step_function(&mut self, forward: bool, cx: &mut Context<Self>) {
+        self.session.update(cx, |s, cx| {
+            match crate::jumps::adjacent_function(&s.functions, s.cursor, forward) {
+                Some(ea) => s.navigate(ea, cx),
+                None => s.info_msg(
+                    if forward {
+                        "No function below the cursor"
+                    } else {
+                        "No function above the cursor"
+                    },
+                    cx,
+                ),
+            }
+        });
+    }
+
+    /// Ctrl+P: a chooser over the functions only.
+    fn jump_to_function(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let s = self.session.read(cx);
+        if !s.is_ready() {
+            return;
+        }
+        let choices: Vec<Choice> = s
+            .functions
+            .iter()
+            .map(|f| Choice {
+                label: f.name.clone().into(),
+                detail: format!("{:X}", f.start).into(),
+                kind: if f.library {
+                    "lib".into()
+                } else if f.thunk {
+                    "thunk".into()
+                } else {
+                    SharedString::default()
+                },
+                group: SharedString::default(),
+                keywords: SharedString::default(),
+                value: ChoiceValue::Ea(f.start),
+            })
+            .collect();
+        let title = format!("Jump to function ({})", choices.len());
+        self.open_modal(
+            title,
+            "",
+            "Filter functions",
+            Rc::new(choices),
+            false,
+            ModalKind::Pick,
+            ModalStyle::Palette {
+                enter: "jump",
+                key_hint: None,
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Opens a chooser over the rows `fut` returns; a single row is jumped to.
+    fn pick_ea(
+        &mut self,
+        title: &'static str,
+        empty: &'static str,
+        jump_if_single: bool,
+        fut: futures::future::LocalBoxFuture<'static, Result<Vec<Choice>, String>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let handle = window.window_handle();
+        let db = self.id;
+        cx.spawn(async move |this, cx| {
+            let result = fut.await;
+            cx.update_window(handle, |_, window, cx| {
+                this.update(cx, |w, cx| match result {
+                    // The reply belongs to a tab that is no longer in front.
+                    _ if w.id != db => {}
+                    Ok(choices) if choices.is_empty() => {
+                        w.session.update(cx, |s, cx| s.info_msg(empty, cx))
+                    }
+                    Ok(choices) => match (&choices[..], jump_if_single) {
+                        ([one], true) => {
+                            if let ChoiceValue::Ea(ea) = one.value {
+                                w.session.update(cx, |s, cx| s.navigate(ea, cx));
+                            }
+                        }
+                        _ => {
+                            let title = format!("{title} ({})", choices.len());
+                            w.open_modal(
+                                title,
+                                "",
+                                "Filter",
+                                Rc::new(choices),
+                                false,
+                                ModalKind::Pick,
+                                ModalStyle::Palette {
+                                    enter: "jump",
+                                    key_hint: None,
+                                },
+                                window,
+                                cx,
+                            );
+                        }
+                    },
+                    Err(e) => w.session.update(cx, |s, cx| s.error(e, cx)),
+                })
+                .ok();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Jump > Jump to segment…
+    fn jump_to_segment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let fut = self.session.read(cx).call(ida_proto::Segments {});
+        let fut = Box::pin(async move {
+            fut.await.map_err(|e| e.to_string()).map(|rows| {
+                rows.into_iter()
+                    .map(|r| Choice {
+                        label: format!("{}  {}", r.name, r.perm).into(),
+                        detail: format!("{:X}-{:X}", r.start, r.end).into(),
+                        kind: r.class.into(),
+                        group: SharedString::default(),
+                        keywords: SharedString::default(),
+                        value: ChoiceValue::Ea(r.start),
+                    })
+                    .collect()
+            })
+        });
+        self.pick_ea("Jump to segment", "No segments", false, fut, window, cx);
+    }
+
+    /// Jump > Jump to entry point: the database's entry points (one jumps at once).
+    fn jump_to_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let fut = self.session.read(cx).call(ida_proto::Exports {});
+        let fut = Box::pin(async move {
+            fut.await.map_err(|e| e.to_string()).map(|rows| {
+                rows.into_iter()
+                    .map(|r| Choice {
+                        label: if r.short.is_empty() { r.name } else { r.short }.into(),
+                        detail: format!("{:X}", r.ea).into(),
+                        kind: "entry".into(),
+                        group: SharedString::default(),
+                        keywords: SharedString::default(),
+                        value: ChoiceValue::Ea(r.ea),
+                    })
+                    .collect()
+            })
+        });
+        self.pick_ea("Entry points", "No entry points", true, fut, window, cx);
+    }
+
+    /// Windows > Reset layout: panel sizes, visibility, tabs and the split
+    /// back to their defaults.
+    fn reset_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let d = settings::PanelLayout::default();
+        self.show_sidebar = d.sidebar;
+        self.show_inspector = d.inspector;
+        self.show_bottom = d.bottom;
+        self.split = d.split;
+        self.sidebar_w = d.sidebar_w;
+        self.inspector_w = d.inspector_w;
+        self.bottom_h = d.bottom_h;
+        self.sidebar
+            .update(cx, |s, cx| s.select_tab(Tab::from_key(&d.rail), cx));
+        self.inspector
+            .update(cx, |i, _| i.tab = InspectorTab::from_key(&d.inspector_tab));
+        self.bottom
+            .update(cx, |b, _| b.tab = BottomTab::from_key(&d.bottom_tab));
+        self.sync_views(cx);
+        self.focus_main(window, cx);
+        self.save_layout(cx);
+        cx.notify();
     }
 
     // ---- rendering the main area ------------------------------------------
@@ -2463,6 +2716,38 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &SearchText, _, cx| w.search(false, cx)))
             .on_action(cx.listener(|w, _: &SearchNextBytes, _, cx| w.search_next(true, cx)))
             .on_action(cx.listener(|w, _: &SearchNextText, _, cx| w.search_next(false, cx)))
+            .on_action(cx.listener(|w, _: &SearchImmediate, _, cx| w.search_immediate(false, cx)))
+            .on_action(
+                cx.listener(|w, _: &SearchNextImmediate, _, cx| w.search_immediate(true, cx)),
+            )
+            .on_action(cx.listener(|w, _: &SearchNextCode, _, cx| w.find_kind("code", "code", cx)))
+            .on_action(cx.listener(|w, _: &SearchNextData, _, cx| w.find_kind("data", "data", cx)))
+            .on_action(cx.listener(|w, _: &SearchNextUnexplored, _, cx| {
+                w.find_kind("unknown", "unexplored bytes", cx)
+            }))
+            .on_action(cx.listener(|w, _: &SearchNotFunction, _, cx| {
+                w.find_kind("notfunc", "code outside a function", cx)
+            }))
+            .on_action(
+                cx.listener(|w, _: &JumpToFunction, window, cx| w.jump_to_function(window, cx)),
+            )
+            .on_action(
+                cx.listener(|w, _: &JumpToSegment, window, cx| w.jump_to_segment(window, cx)),
+            )
+            .on_action(cx.listener(|w, _: &JumpToEntry, window, cx| w.jump_to_entry(window, cx)))
+            .on_action(cx.listener(|w, _: &NextFunction, _, cx| w.step_function(true, cx)))
+            .on_action(cx.listener(|w, _: &PrevFunction, _, cx| w.step_function(false, cx)))
+            .on_action(cx.listener(|w, _: &ResetLayout, window, cx| w.reset_layout(window, cx)))
+            .on_action(cx.listener(|_, _: &ShowDocumentation, _, cx| {
+                crate::automation::open_url(crate::help::DOCS_URL, cx)
+            }))
+            .on_action(cx.listener(|_, _: &ReportIssue, _, cx| {
+                crate::automation::open_url(crate::help::ISSUES_URL, cx)
+            }))
+            .on_action(cx.listener(|w, _: &ShowComingFromIda, window, cx| {
+                let dialog = cx.new(crate::help::ComingFromIdaDialog::new);
+                w.show_dialog(dialog, window, cx);
+            }))
             .on_action(cx.listener(|w, _: &OpenSettings, window, cx| {
                 w.open_settings(Section::Appearance, window, cx)
             }))

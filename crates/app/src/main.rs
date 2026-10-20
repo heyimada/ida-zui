@@ -24,6 +24,7 @@ mod help;
 mod hex;
 mod input;
 mod inspector;
+mod jumps;
 mod listing;
 mod loadlog;
 mod lumina;

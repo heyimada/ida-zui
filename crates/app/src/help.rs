@@ -144,6 +144,186 @@ impl Render for AboutDialog {
     }
 }
 
+pub const DOCS_URL: &str = "https://github.com/heyimada/ida-zui#readme";
+pub const ISSUES_URL: &str = "https://github.com/heyimada/ida-zui/issues/new";
+
+/// "Coming from IDA": the keys that are the same, and where ida-zui differs.
+/// The README carries the same table.
+pub const COMING_FROM_IDA: &[(&str, &str, &str)] = &[
+    (
+        "Jump to address / name",
+        "G",
+        "G (fuzzy over functions and names)",
+    ),
+    (
+        "Jump to function / segment / entry point",
+        "Ctrl+P / Ctrl+S / Ctrl+E",
+        "Ctrl+P / Ctrl+Alt+S / Ctrl+E (Ctrl+S saves here)",
+    ),
+    ("Next / previous function", "Ctrl+Down / Ctrl+Up", "same"),
+    (
+        "Back / forward",
+        "Esc / Ctrl+Enter",
+        "same (plus Alt+Left / Alt+Right)",
+    ),
+    ("Follow", "Enter", "Enter, double-click"),
+    (
+        "Xrefs to / from",
+        "X, Ctrl+X / Ctrl+J",
+        "same (plus Shift+X for from)",
+    ),
+    ("Rename", "N", "N"),
+    (
+        "Comment / repeatable comment",
+        ": / ;",
+        "same (/ in pseudocode too)",
+    ),
+    ("Graph / linear", "Space", "Space"),
+    ("Pseudocode", "F5, Tab", "F5, Tab (Tab again returns)"),
+    (
+        "Search text / bytes, again",
+        "Alt+T / Alt+B, Ctrl+T / Ctrl+B",
+        "same",
+    ),
+    ("Search immediate value, again", "Alt+I, Ctrl+I", "same"),
+    (
+        "Next code / data / unexplored",
+        "Alt+C / Ctrl+D / Ctrl+U",
+        "same",
+    ),
+    ("Next code outside a function", "Alt+U", "Alt+U"),
+    (
+        "Functions / Names / Strings / Segments",
+        "Shift+F3 / Shift+F4 / Shift+F12 / Shift+F7",
+        "same (side panel tabs)",
+    ),
+    ("Local types / Signatures", "Shift+F1 / Shift+F5", "same"),
+    (
+        "Code / data / string / undefine / function",
+        "C D A U P",
+        "same",
+    ),
+    (
+        "Save database",
+        "Ctrl+W",
+        "Ctrl+W (Ctrl+S too); close database is Ctrl+Shift+W",
+    ),
+    ("Undo / redo", "Ctrl+Z / Ctrl+Shift+Z", "same (Ctrl+Y too)"),
+    ("Debugger", "F9 F7 F8 F2 Ctrl+F2 F4", "same"),
+];
+
+pub const COMING_FROM_IDA_NOTES: &str = "The side lists live in a rail on the left instead of floating windows. \
+Because Ctrl+B is IDA's \"search bytes again\", the side-panel filter moved to Ctrl+Shift+B. \
+A database that was just analysed counts as unsaved. There is no database snapshot manager, \
+plugins that need IDA's Qt UI report that they cannot run headless, and the debugger is Windows user mode only.";
+
+/// The same-key-different-place table for people who know IDA.
+pub struct ComingFromIdaDialog {
+    focus: FocusHandle,
+}
+
+impl EventEmitter<DialogEvent> for ComingFromIdaDialog {}
+
+impl ComingFromIdaDialog {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            focus: cx.focus_handle(),
+        }
+    }
+}
+
+impl Focusable for ComingFromIdaDialog {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Render for ComingFromIdaDialog {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(cx);
+        let sh = scrollbar::handle("coming-h", window, cx);
+        let sbar = scrollbar::scrollbar(
+            "coming-scroll",
+            Source::handle(&sh),
+            Axes::V,
+            &theme,
+            window,
+            cx,
+        );
+        let head = |text: &'static str, w: f32| {
+            div()
+                .w(px(w))
+                .flex_none()
+                .text_size(px(11.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(hsla(theme.muted))
+                .child(text.to_uppercase())
+        };
+        frame(&theme, 760.)
+            .key_context("Modal")
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|_, _: &Cancel, _, cx| cx.emit(DialogEvent::Close)))
+            .on_action(cx.listener(|_, _: &Confirm, _, cx| cx.emit(DialogEvent::Close)))
+            .child(header(
+                &theme,
+                "Coming from IDA",
+                cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Close)),
+            ))
+            .child(
+                body()
+                    .child(caption(
+                        &theme,
+                        "The defaults follow IDA's keys where IDA has one. Every key is editable in Options > Keyboard shortcuts.",
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(12.))
+                            .child(head("Action", 250.))
+                            .child(head("IDA", 190.))
+                            .child(head("ida-zui", 240.)),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .h(px(340.))
+                            .child(
+                                div()
+                                    .id("coming-list")
+                                    .size_full()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&sh)
+                                    .flex()
+                                    .flex_col()
+                                    .children(COMING_FROM_IDA.iter().map(|(action, ida, here)| {
+                                        div()
+                                            .flex()
+                                            .gap(px(12.))
+                                            .py(px(3.))
+                                            .child(div().w(px(250.)).flex_none().child(*action))
+                                            .child(
+                                                div()
+                                                    .w(px(190.))
+                                                    .flex_none()
+                                                    .text_color(hsla(theme.muted))
+                                                    .child(*ida),
+                                            )
+                                            .child(div().w(px(240.)).flex_none().child(*here))
+                                    })),
+                            )
+                            .child(sbar),
+                    )
+                    .child(caption(&theme, COMING_FROM_IDA_NOTES)),
+            )
+            .child(
+                footer(&theme).child(
+                    button("close", "Close", ButtonKind::Primary, &theme)
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(DialogEvent::Close))),
+                ),
+            )
+    }
+}
+
 /// Every command with its current keys, filterable.
 pub struct ShortcutsDialog {
     filter: Entity<TextInput>,

@@ -1276,4 +1276,43 @@ int izs_redo(void)
   GUARD_END
 }
 
+// Search > Next code / data / unexplored / not function: the first address
+// of that kind after (or before) `ea`.
+int izs_find_kind(ea_t ea, const char *kind, bool forward)
+{
+  REQUIRE_DB();
+  GUARD_BEGIN
+  int flags = SEARCH_NEXT | SEARCH_NOSHOW | SEARCH_NOBRK | (forward ? SEARCH_DOWN : SEARCH_UP);
+  std::string k = kind;
+  ea_t found;
+  if ( k == "code" )
+    found = find_code(ea, flags);
+  else if ( k == "data" )
+    found = find_data(ea, flags);
+  else if ( k == "unknown" )
+    found = find_unknown(ea, flags);
+  else if ( k == "notfunc" )
+    found = find_not_func(ea, flags);
+  else
+    return fail("unknown search kind '%s'", kind);
+  Json j;
+  j.opt_u64(found, BADADDR);
+  return ok(j);
+  GUARD_END
+}
+
+// Search > Immediate value: the next instruction with `value` as an operand.
+int izs_find_imm(ea_t ea, uint64_t value, bool forward)
+{
+  REQUIRE_DB();
+  GUARD_BEGIN
+  int flags = SEARCH_NEXT | SEARCH_NOSHOW | SEARCH_NOBRK | (forward ? SEARCH_DOWN : SEARCH_UP);
+  int opnum = 0;
+  ea_t found = find_imm(ea, flags, (uval_t)value, &opnum);
+  Json j;
+  j.opt_u64(found, BADADDR);
+  return ok(j);
+  GUARD_END
+}
+
 } // extern "C"

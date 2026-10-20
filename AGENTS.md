@@ -26,10 +26,10 @@ Files in `crates/app`:
 | `code.rs` | Painting and hit-testing tagged lines. |
 | `commands.rs` | Shared rename, comment, type, follow and edit helpers. |
 | `actions.rs` | The command catalog: every action with label, default keys, search aliases and `needs_db`. Bindings, palette, menus, shortcut editor and help all derive from it. |
-| `menubar.rs` | In-app menu bar, built from the catalog and the live keymap. |
+| `menubar.rs` | In-app menu bar, built from the catalog and the live keymap. A label may mark its mnemonic with `&` (`Make &data`; `&&` is a literal ampersand). |
 | `settings.rs`, `settings_view.rs` | `settings.json` (theme, fonts, keymap overrides, recent files) and the Settings dialog with the shortcut editor. |
-| `dialog.rs`, `open_dialog.rs`, `help.rs` | In-app dialogs: question, open-with-options, About, shortcut list. No native message boxes. |
-| `automation.rs` | The automation channel used by `scripts/ui-capture.ps1`. |
+| `dialog.rs`, `open_dialog.rs`, `help.rs` | In-app dialogs: question, open-with-options, About, shortcut list, Coming from IDA. No native message boxes. |
+| `automation.rs` | The automation channel used by `scripts/ui-capture.ps1`. `automation::open_url` is the only way to open a browser: under automation it appends `url: <url>` to `<file>.done` instead. |
 | `theme.rs` | The palettes (Dark and Light from the design spec; High contrast, IDA Classic extended to the same token set) and font cells. Views use tokens only, never literal colors. |
 | `ui.rs` | Design-system pieces: `icon`, `icon_button`, `badge`, `key_cap`, `button` (Primary/Secondary/Ghost/Danger), `segment`, `panel_header`, tooltips, `ring`/`drop_shadow`. Build new UI from these. |
 | `assets.rs`, `assets/` | Embedded icons (`assets/icons/*.svg`, 16 px stroke, tinted by text colour) and IBM Plex Sans (OFL). Adding an icon: drop the SVG in `assets/icons` and run `python scripts/gen_assets.py`. |

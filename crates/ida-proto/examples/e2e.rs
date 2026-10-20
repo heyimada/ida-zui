@@ -2455,6 +2455,69 @@ fn main() {
         "byte search finds the entry bytes",
     );
 
+    // Search > next code / data / unexplored / not function / immediate.
+    for (kind, want) in [("code", "code"), ("data", "data")] {
+        let hit = client
+            .call_blocking(FindKind {
+                ea: entry,
+                kind: kind.into(),
+                forward: true,
+            })
+            .unwrap();
+        let got = hit.map(|ea| client.call_blocking(AddrInfo { ea }).unwrap().kind);
+        writeln!(
+            out,
+            "find_kind {kind} from {entry:#x} -> {hit:x?} ({got:?})"
+        )
+        .unwrap();
+        check(
+            hit.is_some_and(|h| h > entry) && got.as_deref() == Some(want),
+            &format!("find_kind {kind} finds a later {want} item"),
+        );
+    }
+    let bad = client.call_blocking(FindKind {
+        ea: entry,
+        kind: "nonsense".into(),
+        forward: true,
+    });
+    check(bad.is_err(), "find_kind rejects an unknown kind");
+    let back = client
+        .call_blocking(FindKind {
+            ea: info.max_ea,
+            kind: "code".into(),
+            forward: false,
+        })
+        .unwrap();
+    check(
+        back.is_some_and(|b| b < info.max_ea),
+        "find_kind searches backwards too",
+    );
+    let imm = [0x28u64, 0x20, 0x30, 0x38, 8, 1, 0x40]
+        .into_iter()
+        .find_map(|value| {
+            client
+                .call_blocking(FindImm {
+                    ea: info.min_ea.saturating_sub(1),
+                    value,
+                    forward: true,
+                })
+                .unwrap()
+                .map(|ea| (value, ea))
+        });
+    writeln!(out, "find_imm -> {imm:x?}").unwrap();
+    check(
+        imm.is_some_and(|(_, ea)| client.call_blocking(AddrInfo { ea }).unwrap().kind == "code"),
+        "find_imm lands on an instruction",
+    );
+    let none = client
+        .call_blocking(FindImm {
+            ea: info.min_ea.saturating_sub(1),
+            value: 0x1234_5678_9abc_def1,
+            forward: true,
+        })
+        .unwrap();
+    check(none.is_none(), "find_imm of an absent value finds nothing");
+
     let resolved = client
         .call_blocking(Resolve {
             expr: big.name.split('(').next().unwrap().to_owned(),

@@ -158,6 +158,8 @@ mod ffi {
         pub fn izs_dbg_set_exception(code: u32, stop: bool, pass: bool) -> i32;
         pub fn izs_undo() -> i32;
         pub fn izs_redo() -> i32;
+        pub fn izs_find_kind(ea: Ea, kind: *const c_char, forward: bool) -> i32;
+        pub fn izs_find_imm(ea: Ea, value: u64, forward: bool) -> i32;
     }
 }
 
@@ -536,6 +538,14 @@ fn dispatch(method: &str, params: &str) -> Result<String, String> {
             DbgSetException::NAME => {
                 let m: DbgSetException = p(params)?;
                 ffi::izs_dbg_set_exception(m.code, m.stop, m.pass)
+            }
+            FindKind::NAME => {
+                let m: FindKind = p(params)?;
+                ffi::izs_find_kind(m.ea, cstr(&m.kind)?.as_ptr(), m.forward)
+            }
+            FindImm::NAME => {
+                let m: FindImm = p(params)?;
+                ffi::izs_find_imm(m.ea, m.value, m.forward)
             }
             other => return Err(format!("unknown method '{other}'")),
         };

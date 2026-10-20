@@ -63,8 +63,9 @@ impl Workspace {
                                 keywords: SharedString::default(),
                             })
                             .collect();
+                        let title = format!("Attach to process ({})", choices.len());
                         w.open_modal(
-                            "Attach to process",
+                            title,
                             "",
                             "Filter by name",
                             Rc::new(choices),

@@ -77,19 +77,57 @@ pub enum Entry {
     },
 }
 
-/// The mnemonic of each entry: the first letter of its label that no earlier
-/// entry of the same menu level took.
+/// A menu label as written: `&` marks the mnemonic letter that follows it
+/// (`Make &data`), `&&` is a literal ampersand. Returns the text to show and
+/// the byte offset of the marked letter in it.
+pub fn parse_label(raw: &str) -> (String, Option<usize>) {
+    let mut text = String::with_capacity(raw.len());
+    let mut mark = None;
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '&' {
+            text.push(c);
+        } else if chars.peek() == Some(&'&') {
+            chars.next();
+            text.push('&');
+        } else if mark.is_none() && chars.peek().is_some() {
+            mark = Some(text.len());
+        }
+    }
+    (text, mark)
+}
+
+fn entry_label(e: &Entry) -> Option<&SharedString> {
+    match e {
+        Entry::Item(i) => Some(&i.label),
+        Entry::Sub { label, .. } => Some(label),
+        Entry::Sep => None,
+    }
+}
+
+/// The mnemonic of each entry, as a byte offset into its displayed label
+/// (see `parse_label`): the letter marked with `&`, else the first letter
+/// that no other entry of the same menu level took.
 pub fn mnemonics(entries: &[Entry]) -> Vec<Option<usize>> {
-    let mut taken: Vec<char> = Vec::new();
-    entries
+    let parsed: Vec<Option<(String, Option<usize>)>> = entries
         .iter()
-        .map(|e| {
-            let label = match e {
-                Entry::Item(i) => &i.label,
-                Entry::Sub { label, .. } => label,
-                Entry::Sep => return None,
-            };
-            let (at, ch) = label
+        .map(|e| entry_label(e).map(|l| parse_label(l)))
+        .collect();
+    let letter = |text: &str, at: usize| text[at..].chars().next().map(|c| c.to_ascii_lowercase());
+    // Marked letters are claimed first, so an earlier unmarked label cannot take them.
+    let mut taken: Vec<char> = parsed
+        .iter()
+        .flatten()
+        .filter_map(|(t, m)| m.and_then(|at| letter(t, at)))
+        .collect();
+    parsed
+        .iter()
+        .map(|p| {
+            let (text, mark) = p.as_ref()?;
+            if mark.is_some() {
+                return *mark;
+            }
+            let (at, ch) = text
                 .char_indices()
                 .find(|(_, c)| c.is_alphanumeric() && !taken.contains(&c.to_ascii_lowercase()))?;
             taken.push(ch.to_ascii_lowercase());
@@ -275,19 +313,19 @@ pub fn build(ready: bool, view: ViewState, dbs: &[DbEntry], cx: &App) -> Vec<Men
             "File",
             0,
             vec![
-                c!(OpenFile, "Open…"),
-                c!(OpenWithOptions, "Open with options…"),
-                c!(LocateIda, "Locate IDA…"),
+                c!(OpenFile, "&Open…"),
+                c!(OpenWithOptions, "Open &with options…"),
+                c!(LocateIda, "&Locate IDA…"),
                 Entry::Sub {
-                    label: "Recent files".into(),
+                    label: "&Recent files".into(),
                     enabled: has_recent,
                     entries: recent_entries,
                 },
                 Entry::Sep,
-                c!(RunScriptFile, "Script file…"),
+                c!(RunScriptFile, "Script &file…"),
                 Entry::Sep,
                 Entry::Sub {
-                    label: "Lumina".into(),
+                    label: "L&umina".into(),
                     enabled: true,
                     entries: vec![
                         c!(LuminaPullAll, "Pull metadata for all functions"),
@@ -301,38 +339,38 @@ pub fn build(ready: bool, view: ViewState, dbs: &[DbEntry], cx: &App) -> Vec<Men
                     ],
                 },
                 Entry::Sep,
-                c!(Save),
-                c!(CloseDatabase),
+                c!(Save, "&Save database"),
+                c!(CloseDatabase, "&Close database"),
                 Entry::Sep,
-                c!(Quit, "Exit"),
+                c!(Quit, "E&xit"),
             ],
         ),
         m(
             "Edit",
             0,
             vec![
-                c!(Undo),
-                c!(Redo),
+                c!(Undo, "&Undo"),
+                c!(Redo, "&Redo"),
                 Entry::Sep,
-                c!(CopyAddress),
+                c!(CopyAddress, "Copy current &address"),
                 Entry::Sep,
-                c!(Rename),
-                c!(Comment),
-                c!(RepeatableComment),
-                c!(SetType),
+                c!(Rename, "Re&name"),
+                c!(Comment, "&Comment"),
+                c!(RepeatableComment, "Re&peatable comment"),
+                c!(SetType, "Set &type"),
                 Entry::Sep,
-                c!(MakeCode),
-                c!(MakeData),
-                c!(MakeString),
-                c!(Undefine),
+                c!(MakeCode, "Make c&ode"),
+                c!(MakeData, "Make &data"),
+                c!(MakeString, "Make &string"),
+                c!(Undefine, "Unde&fine"),
                 Entry::Sep,
-                c!(MakeFunction),
-                c!(DeleteFunction),
+                c!(MakeFunction, "Cr&eate function"),
+                c!(DeleteFunction, "De&lete function"),
                 Entry::Sep,
-                c!(ToggleCollapse),
+                c!(ToggleCollapse, "E&xpand / collapse"),
                 Entry::Sep,
                 Entry::Sub {
-                    label: "Plugins".into(),
+                    label: "Plug&ins".into(),
                     enabled: ready,
                     entries: plugin_entries,
                 },
@@ -343,9 +381,15 @@ pub fn build(ready: bool, view: ViewState, dbs: &[DbEntry], cx: &App) -> Vec<Men
             0,
             vec![
                 c!(GoTo, "Jump to address…"),
+                c!(JumpToFunction),
+                c!(JumpToSegment),
+                c!(JumpToEntry),
                 Entry::Sep,
                 c!(Back),
                 c!(Forward),
+                Entry::Sep,
+                c!(PrevFunction),
+                c!(NextFunction),
                 Entry::Sep,
                 c!(XrefsTo),
                 c!(XrefsFrom),
@@ -359,6 +403,14 @@ pub fn build(ready: bool, view: ViewState, dbs: &[DbEntry], cx: &App) -> Vec<Men
                 c!(SearchNextText, "Text again"),
                 c!(SearchBytes, "Bytes…"),
                 c!(SearchNextBytes, "Bytes again"),
+                Entry::Sep,
+                c!(SearchImmediate, "Immediate value…"),
+                c!(SearchNextImmediate, "Immediate value again"),
+                Entry::Sep,
+                c!(SearchNextCode, "Next code"),
+                c!(SearchNextData, "Next data"),
+                c!(SearchNextUnexplored, "Next unexplored"),
+                c!(SearchNotFunction, "Next code outside a function"),
             ],
         ),
         m(
@@ -370,28 +422,52 @@ pub fn build(ready: bool, view: ViewState, dbs: &[DbEntry], cx: &App) -> Vec<Men
                 c!(ShowHex, "Hex"),
                 c!(ShowPseudocode, "Pseudocode"),
                 c!(TogglePseudocode, "Switch to pseudocode pane"),
-                Entry::Sep,
-                c!(ShowLocalTypes, "Local types"),
-                c!(ShowStructures),
-                c!(ShowEnums),
-                c!(ShowFrame),
-                c!(ShowSignatures),
-                c!(ShowProximity),
-                c!(CloseTab),
-                Entry::Sep,
-                toggle(c!(ToggleSidebar, "Side panel"), view.sidebar),
-                toggle(c!(ToggleInspector, "Inspector"), view.inspector),
-                toggle(c!(ToggleBottomPanel, "Bottom panel"), view.bottom),
-                c!(ToggleOutput, "Output"),
-                c!(ShowXrefsPanel, "Live xrefs"),
-                c!(ShowPythonConsole, "Python console"),
-                Entry::Sep,
                 toggle(c!(ToggleSplit, "Split with pseudocode"), view.split),
                 Entry::Sep,
-                c!(ZoomIn),
-                c!(ZoomOut),
-                c!(ZoomReset),
-                c!(ToggleMinimap, "Graph minimap"),
+                Entry::Sub {
+                    label: "Open subviews".into(),
+                    enabled: ready,
+                    entries: vec![
+                        c!(ShowFunctions),
+                        c!(ShowNames),
+                        c!(ShowStrings),
+                        c!(ShowImports),
+                        c!(ShowExports),
+                        c!(ShowSegments),
+                        c!(ShowTypes),
+                        Entry::Sep,
+                        c!(ShowLocalTypes),
+                        c!(ShowStructures),
+                        c!(ShowEnums),
+                        c!(ShowFrame),
+                        c!(ShowSignatures),
+                        c!(ShowPlugins),
+                        c!(ShowProximity),
+                        Entry::Sep,
+                        c!(ShowPythonConsole),
+                    ],
+                },
+                Entry::Sub {
+                    label: "Toolbars and panels".into(),
+                    enabled: ready,
+                    entries: vec![
+                        toggle(c!(ToggleSidebar, "Side panel"), view.sidebar),
+                        toggle(c!(ToggleInspector, "Inspector"), view.inspector),
+                        toggle(c!(ToggleBottomPanel, "Bottom panel"), view.bottom),
+                        c!(ToggleOutput, "Output"),
+                        c!(ShowXrefsPanel, "Live xrefs"),
+                    ],
+                },
+                Entry::Sub {
+                    label: "Graph".into(),
+                    enabled: ready,
+                    entries: vec![
+                        c!(ZoomIn),
+                        c!(ZoomOut),
+                        c!(ZoomReset),
+                        c!(ToggleMinimap, "Minimap"),
+                    ],
+                },
                 Entry::Sep,
                 c!(CommandPalette, "Command palette…"),
             ],
@@ -461,26 +537,11 @@ pub fn build(ready: bool, view: ViewState, dbs: &[DbEntry], cx: &App) -> Vec<Men
             "Windows",
             0,
             vec![
-                c!(ShowFunctions),
-                c!(ShowNames),
-                c!(ShowStrings),
-                c!(ShowImports),
-                c!(ShowExports),
-                c!(ShowSegments),
-                c!(ShowTypes),
-                Entry::Sep,
-                c!(ShowLocalTypes),
-                c!(ShowStructures),
-                c!(ShowEnums),
-                c!(ShowFrame),
-                c!(ShowSignatures),
-                c!(ShowPlugins),
-                c!(ShowProximity),
-                Entry::Sep,
-                c!(ShowPythonConsole),
-                Entry::Sep,
                 c!(NextDatabase),
                 c!(PrevDatabase),
+                Entry::Sep,
+                c!(CloseTab),
+                c!(ResetLayout),
             ]
             .into_iter()
             .chain((!dbs.is_empty()).then_some(Entry::Sep))
@@ -505,7 +566,12 @@ pub fn build(ready: bool, view: ViewState, dbs: &[DbEntry], cx: &App) -> Vec<Men
             "Help",
             0,
             vec![
+                c!(ShowDocumentation, "Documentation"),
+                c!(ReportIssue, "Report an issue…"),
+                Entry::Sep,
+                c!(ShowComingFromIda, "Coming from IDA…"),
                 c!(ShowShortcuts, "Keyboard shortcuts"),
+                Entry::Sep,
                 c!(About, "About ida-zui…"),
             ],
         ),
@@ -738,7 +804,9 @@ impl MenuBar {
     }
 
     /// A label with its mnemonic letter underlined.
-    fn label(text: &SharedString, mnemonic: Option<usize>) -> StyledText {
+    fn label(raw: &SharedString, mnemonic: Option<usize>) -> StyledText {
+        let text: SharedString = parse_label(raw).0.into();
+        let text = &text;
         match mnemonic {
             Some(at) => {
                 let len = text[at..].chars().next().map_or(1, char::len_utf8);
@@ -780,12 +848,10 @@ impl MenuBar {
         let hit = entries.iter().enumerate().position(|(i, e)| {
             e.selectable()
                 && marks[i].is_some_and(|at| {
-                    let label = match e {
-                        Entry::Item(it) => &it.label,
-                        Entry::Sub { label, .. } => label,
-                        Entry::Sep => return false,
+                    let Some(label) = entry_label(e) else {
+                        return false;
                     };
-                    label[at..]
+                    parse_label(label).0[at..]
                         .chars()
                         .next()
                         .is_some_and(|l| l.eq_ignore_ascii_case(&c))
@@ -1078,6 +1144,35 @@ mod tests {
         let marks = mnemonics(&entries);
         // "Open with options" cannot reuse O, so it takes p.
         assert_eq!(marks, vec![Some(0), Some(1), None, Some(0), Some(0)]);
+    }
+
+    #[test]
+    fn an_ampersand_marks_the_mnemonic_and_is_not_shown() {
+        assert_eq!(parse_label("Make &data"), ("Make data".to_owned(), Some(5)));
+        assert_eq!(parse_label("No marker"), ("No marker".to_owned(), None));
+        // `&&` is a literal ampersand, and a trailing `&` marks nothing.
+        assert_eq!(
+            parse_label("Save && &exit"),
+            ("Save & exit".to_owned(), Some(7))
+        );
+        assert_eq!(parse_label("Tom &"), ("Tom ".to_owned(), None));
+    }
+
+    #[test]
+    fn explicit_mnemonics_win_and_automatic_ones_stay_out_of_their_way() {
+        // Marking the c and d keeps both Make entries natural (automatically the
+        // second would get `a`), and a marked letter is never taken by an
+        // unmarked label that comes before it.
+        let entries = [
+            item("Undo"),
+            item("Make &code"),
+            item("Make &data"),
+            item("Undefine"),
+            item("&Unmark"),
+        ];
+        let marks = mnemonics(&entries);
+        // Undo gives U to &Unmark (n); Undefine finds U, n and d (Make &data) gone (e).
+        assert_eq!(marks, vec![Some(1), Some(5), Some(5), Some(3), Some(0)]);
     }
 
     #[test]

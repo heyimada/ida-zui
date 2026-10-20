@@ -13,6 +13,7 @@
 //   drop <path>[|<path>..]  files dropped on the window, through gpui's file-drop events (what an OS drop becomes)
 //   marker <name>        appends <name> to <file>.done
 //   clipboard <text>     seeds the in-process clipboard (the system one is never used)
+//   (open_url: Help > Documentation and Report an issue append `url: <url>` to <file>.done instead of opening a browser)
 //   clipdump             appends the in-process clipboard to <file>.done as `clipboard: <text>`
 use gpui::{
     AnyWindowHandle, App, AppContext, ExternalPaths, FileDropEvent, Keystroke, Modifiers,
@@ -219,6 +220,17 @@ fn run(line: &str, channel: &std::path::Path, window: &mut Window, cx: &mut App)
         }
         "marker" => append_done(channel, arg.trim()),
         _ => false,
+    }
+}
+
+/// Opens `url` in the default browser. Under automation nothing is opened:
+/// the URL goes to `<file>.done` as `url: <url>` so a test can check it.
+pub fn open_url(url: &str, cx: &mut App) {
+    match channel_path() {
+        Some(channel) => {
+            append_done(&channel, &format!("url: {url}"));
+        }
+        None => cx.open_url(url),
     }
 }
 

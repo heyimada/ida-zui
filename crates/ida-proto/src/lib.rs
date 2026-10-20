@@ -251,6 +251,11 @@ methods! {
     DbgEval = "dbg_eval" { expr: String } -> Ea;
     DbgExceptions = "dbg_exceptions" {} -> Vec<DbgException>;
     DbgSetException = "dbg_set_exception" { code: u32, stop: bool, pass: bool } -> Vec<DbgException>;
+    /// The next address of `kind` (`code`, `data`, `unknown`, `notfunc`)
+    /// after `ea` (before it when not `forward`); `None` when there is none.
+    FindKind = "find_kind" { ea: Ea, kind: String, forward: bool } -> Option<Ea>;
+    /// The next instruction with `value` as an immediate operand.
+    FindImm = "find_imm" { ea: Ea, value: u64, forward: bool } -> Option<Ea>;
 }
 
 /// `plugin_t::flags` bits, as `PLUGIN_*` in loader.hpp.

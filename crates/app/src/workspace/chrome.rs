@@ -631,6 +631,7 @@ impl Workspace {
                         .on_click(cx.listener(|w, _, window, cx| w.prompt_open(window, cx))),
                     )
             });
+        let analyzing = self.session.read(cx).analyzing();
         let pill = ready.then(|| {
             div()
                 .h(px(28.))
@@ -647,13 +648,16 @@ impl Workspace {
                 .child(icon("file", 16., hsla(t.muted)))
                 .child(div().font_weight(gpui::FontWeight::MEDIUM).child(file))
                 .child(div().text_color(hsla(t.muted)).child(detail))
-                .child(ui::dot(6., t.success))
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(hsla(t.muted))
-                        .child("Analysis idle"),
-                )
+                // Only while a run is in progress; idle is the normal state.
+                .when(analyzing, |d| {
+                    d.child(ui::spinner("pill-spin", 12., hsla(t.accent)))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(hsla(t.muted))
+                                .child("Analyzing"),
+                        )
+                })
         });
         let debug = self.debug_controls(&t, cx);
         let mode = self.mode;
