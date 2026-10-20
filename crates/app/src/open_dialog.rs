@@ -18,8 +18,7 @@ use gpui::{
 use std::path::{Path, PathBuf};
 
 /// Processor modules offered for raw binaries: IDA's processor name and a label.
-/// Each name was checked by opening a blob with it and reading the processor back
-/// (tricore, msp430 and xtensa did not round-trip headless, so they are not offered).
+/// Each name was checked by opening a blob with it and reading the processor back.
 pub const PROCESSORS: &[(&str, &str)] = &[
     ("metapc", "x86 / x86-64"),
     ("arm", "ARM / AArch64"),
@@ -33,6 +32,9 @@ pub const PROCESSORS: &[(&str, &str)] = &[
     ("sh4", "Hitachi SH"),
     ("z80", "Zilog Z80"),
     ("wasm", "WebAssembly"),
+    ("tricore", "Infineon TriCore"),
+    ("msp430", "TI MSP430"),
+    ("xtensa", "Tensilica Xtensa"),
 ];
 
 use ida_proto::client::processor_extension;
@@ -429,6 +431,18 @@ impl Render for OpenDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// IDA drops a map key longer than nine characters, which silently turns
+    /// the processor into metapc; two names sharing a key would clash.
+    #[test]
+    fn processor_extensions_are_short_and_distinct() {
+        let mut seen = std::collections::HashSet::new();
+        for (p, _) in PROCESSORS {
+            let ext = processor_extension(p);
+            assert!(ext.len() <= 9, "{p}: {ext}");
+            assert!(seen.insert(ext), "{p} shares its extension");
+        }
+    }
 
     #[test]
     fn forced_processor_opens_a_private_copy() {

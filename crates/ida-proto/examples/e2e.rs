@@ -100,6 +100,93 @@ fn raw_blob_as_arm(binary: &std::path::Path, out: &mut String, check: &mut impl 
     let _ = c.call_blocking(Close { save: false });
 }
 
+/// Raw blobs for processors whose modules need a key the map can only carry
+/// in a short extension (IDA drops longer ones): each opens as the forced
+/// processor and a few instructions of that architecture disassemble.
+fn raw_blobs_more(binary: &std::path::Path, out: &mut String, check: &mut impl FnMut(bool, &str)) {
+    // (processor name, procname IDA reports, code, mnemonics expected in the listing)
+    let cases: [(&str, &str, &[u8], &[&str]); 3] = [
+        // mov d15,1 / nop / ret
+        (
+            "tricore",
+            "tricore",
+            &[0xDA, 0x01, 0x00, 0x00, 0x00, 0x90],
+            &["MOV", "RET"],
+        ),
+        // entry a1,32 / nop / ret
+        (
+            "xtensa",
+            "xtensa",
+            &[0x36, 0x41, 0x00, 0xF0, 0x20, 0x00, 0x80, 0x00, 0x00],
+            &["ENTRY", "RET"],
+        ),
+        // mov #1,r15 / nop / ret
+        (
+            "msp430",
+            "msp430",
+            &[0x1F, 0x43, 0x03, 0x43, 0x30, 0x41],
+            &["MOV", "RET"],
+        ),
+    ];
+    let names: Vec<&str> = ["arm", "mipsl", "tricore", "msp430", "xtensa"].to_vec();
+    for (proc, expect, code, mnemonics) in cases {
+        let dir = binary.parent().unwrap().join(format!("raw_{proc}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join(format!("blob.bin.{}", client::processor_extension(proc)));
+        std::fs::write(&input, code).unwrap();
+        let cfg = HostConfig::discover()
+            .raw_binary(&dir.join("idausr"), &names)
+            .expect("write IDAUSR");
+        let (c, _logs) = Client::spawn(&cfg).expect("spawn raw host");
+        writeln!(
+            out,
+            "
+== raw blob as {proc}"
+        )
+        .unwrap();
+        let info = match c.call_blocking(Open {
+            path: input.display().to_string(),
+            auto_analyze: false,
+            base: None,
+        }) {
+            Ok(i) => i,
+            Err(e) => {
+                writeln!(out, "open failed: {e}").unwrap();
+                check(false, &format!("the {proc} blob opens"));
+                continue;
+            }
+        };
+        writeln!(out, "processor={} bitness={}", info.processor, info.bitness).unwrap();
+        check(
+            info.processor.eq_ignore_ascii_case(expect),
+            &format!("the forced processor is {proc}"),
+        );
+        c.call_blocking(MakeCode { ea: info.min_ea }).unwrap();
+        let list = c
+            .call_blocking(ListingDown {
+                ea: info.min_ea,
+                count: 60,
+            })
+            .unwrap();
+        let text: Vec<String> = list.lines.iter().map(|l| tags::strip(&l.tagged)).collect();
+        for l in &text {
+            writeln!(out, "{l}").unwrap();
+        }
+        let joined = text
+            .join(
+                "
+",
+            )
+            .to_uppercase();
+        check(
+            mnemonics.iter().all(|m| joined.contains(m)),
+            &format!("the {proc} blob disassembles ({})", mnemonics.join(", ")),
+        );
+        let _ = c.call_blocking(Close { save: false });
+    }
+}
+
 const MARKER_PLUGIN: &str = r#"
 import ida_idaapi, ida_kernwin, ida_ida, idc
 
@@ -2045,7 +2132,7 @@ fn main() {
     let up = client
         .call_blocking(ListingUp {
             ea: entry,
-            count: 20,
+            count: 60,
         })
         .unwrap();
     eprintln!(
@@ -2753,6 +2840,7 @@ fn main() {
         );
     }
     raw_blob_as_arm(&binary, &mut out, &mut check);
+    raw_blobs_more(&binary, &mut out, &mut check);
     plugins(&binary, &mut out, &mut check);
     eprintln!("[{:6.1}s] host log", t0.elapsed().as_secs_f32());
     writeln!(out, "\n== host log ({} lines)", logs.len()).unwrap();

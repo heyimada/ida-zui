@@ -69,7 +69,7 @@ SDK headers are in `<sdk>/include`. Read the real signature in the header before
 - Use in-app dialogs (`dialog.rs`), not `window.prompt`: native dialogs cannot be automated. `cx.prompt_for_paths` (file picker) only sits behind a Browse button.
 - `cx.clear_key_bindings()` wipes everything, so always rebind through `actions::apply_keymap`. Shortcut labels come from `actions::shortcut_text` (keymap level, context-free). Key listeners run after bindings, so the shortcut recorder uses `cx.intercept_keystrokes`.
 - A bare Alt press and release arrives as the keystroke `alt` (bound to the menu bar). Dropdowns use `deferred`; a clear sheet under the bar swallows the click that closes them.
-- Raw binaries: the host takes `--loader-binary`; the processor is chosen through a private `IDAUSR` (`HostConfig::raw_binary`) plus an input copy named `<file>.izp_<proc>`. An `izp_metapc` map entry breaks every other lookup, so metapc needs no copy. Processor names offered in the dialog were verified by opening a blob and reading the processor back.
+- Raw binaries: the host takes `--loader-binary`; the processor is chosen through a private `IDAUSR` (`HostConfig::raw_binary`) plus an input copy named `<file>.izp_<proc>`. An `izp_metapc` map entry breaks every other lookup, so metapc needs no copy. The map holds one entry per line, no commas, and IDA ignores keys longer than nine characters (`processor_extension` shortens long names). Processor names offered in the dialog were verified by opening a blob and reading the processor back.
 - The debug build has a console window. The real window title is `<file> — ida-zui`.
 
 ## Build, test and verify (all required before you report done)

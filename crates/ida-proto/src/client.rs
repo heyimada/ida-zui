@@ -184,19 +184,29 @@ fn version_key(name: &str) -> Vec<u64> {
 /// The private file extension that maps to `processor` in the IDAUSR config
 /// written by [`HostConfig::raw_binary`]. A raw input must be opened under a
 /// name ending in it (`blob.bin.izp_arm`) for IDA to pick that processor.
+/// IDA ignores a map key longer than nine characters, so a long name keeps
+/// three letters and ends in a two-digit checksum (`izp_tri26`).
 pub fn processor_extension(processor: &str) -> String {
     let clean: String = processor
         .chars()
         .filter(char::is_ascii_alphanumeric)
         .collect::<String>()
         .to_lowercase();
-    format!("izp_{clean}")
+    if clean.len() <= 5 {
+        return format!("izp_{clean}");
+    }
+    let sum = clean
+        .bytes()
+        .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b)))
+        % 100;
+    format!("izp_{}{sum:02}", &clean[..3])
 }
 
 impl HostConfig {
     /// Loads inputs with IDA's "Binary file" loader and makes the processor
     /// choosable per input: `dir` becomes a private IDAUSR whose `ida.cfg`
-    /// maps `processor_extension(p)` to each `p`. The user's own IDAUSR (or
+    /// maps `processor_extension(p)` to each `p` (one entry per line: with commas
+    /// between entries only the first is found). The user's own IDAUSR (or
     /// IDA's default per-user directory) stays on the path so their plugins
     /// still load.
     pub fn raw_binary(mut self, dir: &Path, processors: &[&str]) -> std::io::Result<Self> {
@@ -211,7 +221,7 @@ DEFAULT_PROCESSOR = {{
 }}
 ",
             entries.join(
-                ",
+                "
 "
             )
         );

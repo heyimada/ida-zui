@@ -45,7 +45,7 @@ Nothing open: S1 to S4 are resolved (see Phase 8a below).
 
 | # | Gap | Source | Pri | Suggested fix |
 |---|---|---|---|---|
-| H1 | `tricore`, `msp430` and `xtensa` don't round-trip headless through the `DEFAULT_PROCESSOR` workaround, so the open dialog doesn't offer them. Retried in 8b with the module names, upper case and mixed case: each still opens as metapc. | 2 | P3 | Investigate the processor module names and IDAUSR mapping per module. Add each one back once verified. |
+| H1 | Resolved: `tricore`, `msp430` and `xtensa` came out as metapc because the processor map used commas between entries (only the first is read) and keys longer than nine characters are ignored. Fixed in `raw_binary` / `processor_extension`; all three are in the open dialog and in the protocol E2E. | 2 | - | Done. |
 
 ## Resolved in Phase 8b
 

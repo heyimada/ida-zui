@@ -77,6 +77,7 @@ auto_wait();
 - Any non-empty `args` to `open_database` exits the process with code `0xDEAD`.
 - `init_library(argc, argv)` with `argv[0]="ida"` and **one** switch: `-TBinary file` (a single token) forces the loader. `-L<log>` is also accepted. `-p`, `-b`, `-A` and others fail.
 - **Choosing the processor:** add a `DEFAULT_PROCESSOR = { "ext" : "proc" }` entry in `<IDAUSR>\cfg\ida.cfg` keyed by file extension, then open a copy named `x.<ext>` with `-TBinary file`. This was verified for ARM.
+- **Map syntax pitfalls (why tricore, msp430 and xtensa once came out as metapc):** the entries must be separated by newlines only, as in IDA's own `ida.cfg`; with commas between them only the first entry is found. And a key longer than nine characters (`izp_xtensa`, `izp_tricore`) is never matched, so the open silently falls back to metapc. With both fixed, `tricore.dll`, `xtensa.dll` and the IDAPython module `msp430.py` all load headless through the map (no device dialog, no `TRICORE_DEVICE` key and no `set_processor_type` needed; IDAPython is available when the module is resolved). Verified by reading `inf` procname back and disassembling a tiny blob for each.
 - `set_processor_type` after load fails.
 - **Base address:** `rebase_program(delta, MSF_FIXONCE)` after load works.
 
