@@ -16,7 +16,7 @@ pub const TAB_H: f32 = 32.;
 pub const CRUMB_H: f32 = 28.;
 
 /// `find.exe` from a path or a title.
-fn short_name(full: &str) -> String {
+pub(super) fn short_name(full: &str) -> String {
     full.split('(').next().unwrap_or(full).trim().to_owned()
 }
 
@@ -660,7 +660,14 @@ impl Workspace {
                 })
         });
         let debug = self.debug_controls(&t, cx);
-        let mode = self.mode;
+        // The control shows the kind of the tab in front.
+        let mode = match self.active_kind() {
+            Some(crate::session::ViewKind::Listing) => Mode::Linear,
+            Some(crate::session::ViewKind::Graph) => Mode::Graph,
+            Some(crate::session::ViewKind::Hex) => Mode::Hex,
+            Some(crate::session::ViewKind::Pseudocode) => Mode::Pseudo,
+            None => self.mode,
+        };
         let seg = |id: &'static str, label: &'static str, m: Mode, cx: &mut Context<Self>| {
             ui::segment(id, label, mode == m, &t)
                 .on_click(cx.listener(move |w, _, window, cx| w.set_mode(m, window, cx)))
@@ -831,15 +838,29 @@ impl Workspace {
     pub fn tab_strip(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = *theme;
         let s = self.session.read(cx);
+        // The main view's own place (a pinned tab may have moved the session cursor).
+        let main_at = match self.mode {
+            crate::database::Mode::Linear => self.listing.read(cx).current_ea(),
+            crate::database::Mode::Graph => self.graph.read(cx).current_ea(),
+            crate::database::Mode::Hex => self.hex.read(cx).current_ea(),
+            crate::database::Mode::Pseudo => self.pseudo.read(cx).current_ea(),
+        }
+        .unwrap_or(s.cursor);
         let main_title = s
-            .function_at(s.cursor)
+            .function_at(main_at)
             .map(|f| short_name(&f.name))
             .or_else(|| s.file_name())
             .unwrap_or_default();
         let dirty = s.dirty;
         let main_on = self.doc.is_none();
-        let docs: Vec<(u64, SharedString)> =
-            self.docs.iter().map(|d| (d.id, d.title.clone())).collect();
+        let docs: Vec<(u64, SharedString)> = self
+            .docs
+            .iter()
+            .map(|d| match &d.view {
+                crate::docs::DocView::Code(cv) => (d.id, self.code_tab_title(cv, cx)),
+                _ => (d.id, d.title.clone()),
+            })
+            .collect();
         let tab_base = |id: gpui::ElementId, on: bool| {
             let tb = div()
                 .id(id)

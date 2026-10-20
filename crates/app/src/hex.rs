@@ -138,6 +138,8 @@ pub struct HexView {
     session: Entity<Session>,
     /// This view\'s identity in `SessionEvent::CursorMoved`.
     origin: Origin,
+    /// A pinned view (a tab opened with "Open in new tab") only moves on its own jumps.
+    pub pinned: bool,
     focus: FocusHandle,
     segs: Vec<SegRow>,
     /// Cumulative row index where each segment starts.
@@ -178,14 +180,42 @@ const HEADER_ROWS: f32 = 1.;
 const MAX_COPY: u64 = 1 << 20;
 
 impl HexView {
+    pub fn origin(&self) -> Origin {
+        self.origin
+    }
+
+    /// Shows `ea` (a tab opened at an address).
+    pub fn jump_to(&mut self, ea: Ea, cx: &mut Context<Self>) {
+        if self.segs.is_empty() {
+            // A view made after the database opened: it has not seen `Opened`.
+            self.cursor = ea;
+            self.load_segments(cx);
+            self.load_patches(cx);
+        } else {
+            self.show(ea, true, cx)
+        }
+    }
+
+    /// The address this view is at (for a tab's title), when it has one.
+    pub fn current_ea(&self) -> Option<Ea> {
+        Some(self.cursor)
+    }
+
     pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
         let sub = cx.subscribe(&session, |this, _, ev, cx| match ev {
             SessionEvent::Opened => {
                 this.load_segments(cx);
                 this.load_patches(cx);
             }
-            SessionEvent::Navigated { ea, .. } => this.show(*ea, true, cx),
-            SessionEvent::CursorMoved { ea, origin } if *origin != this.origin => {
+            SessionEvent::Navigated { ea, .. }
+                if this.session.read(cx).follows(this.origin, this.pinned) =>
+            {
+                this.show(*ea, true, cx)
+            }
+            SessionEvent::CursorMoved { ea, origin }
+                if *origin != this.origin
+                    && this.session.read(cx).follows(this.origin, this.pinned) =>
+            {
                 this.show(*ea, false, cx)
             }
             SessionEvent::Changed => {
@@ -216,6 +246,7 @@ impl HexView {
         });
         Self {
             session,
+            pinned: false,
             origin: Origin::new(ViewKind::Hex),
             focus: cx.focus_handle(),
             segs: Vec::new(),
@@ -355,7 +386,11 @@ impl HexView {
                     }
                     v.total_rows = rows;
                     v.segs = segs;
-                    let ea = v.session.read(cx).cursor;
+                    let ea = if v.cursor != 0 {
+                        v.cursor
+                    } else {
+                        v.session.read(cx).cursor
+                    };
                     v.show(ea, true, cx);
                 })
                 .ok();

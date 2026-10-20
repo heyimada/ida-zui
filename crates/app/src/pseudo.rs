@@ -19,6 +19,8 @@ pub struct PseudoView {
     session: Entity<Session>,
     /// This view\'s identity in `SessionEvent::CursorMoved`.
     origin: Origin,
+    /// A pinned view (a tab opened with "Open in new tab") only moves on its own jumps.
+    pub pinned: bool,
     focus: FocusHandle,
     func: Option<Ea>,
     name: SharedString,
@@ -55,10 +57,31 @@ pub struct PseudoView {
 }
 
 impl PseudoView {
+    /// Where to show when first shown (a tab opened hidden).
+    pub fn set_wanted(&mut self, ea: Ea) {
+        self.wanted = Some(ea);
+    }
+
+    pub fn origin(&self) -> Origin {
+        self.origin
+    }
+
+    /// The address this view is at (for a tab's title), when it has one.
+    pub fn current_ea(&self) -> Option<Ea> {
+        self.func
+    }
+
     pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
         let sub = cx.subscribe(&session, |this, _, ev, cx| match ev {
-            SessionEvent::Navigated { ea, .. } => this.follow_address(*ea, cx),
-            SessionEvent::CursorMoved { ea, origin } if *origin != this.origin => {
+            SessionEvent::Navigated { ea, .. }
+                if this.session.read(cx).follows(this.origin, this.pinned) =>
+            {
+                this.follow_address(*ea, cx)
+            }
+            SessionEvent::CursorMoved { ea, origin }
+                if *origin != this.origin
+                    && this.session.read(cx).follows(this.origin, this.pinned) =>
+            {
                 this.follow_address(*ea, cx)
             }
             SessionEvent::Changed => {
@@ -77,6 +100,7 @@ impl PseudoView {
         });
         Self {
             session,
+            pinned: false,
             origin: Origin::new(ViewKind::Pseudocode),
             focus: cx.focus_handle(),
             func: None,
@@ -383,7 +407,17 @@ impl PseudoView {
             l.word_at(col)
                 .map(|r| SharedString::from(l.text[r].to_owned()))
         });
-        if ev.click_count >= 2 {
+        if ev.modifiers.control {
+            self.with_item(cx, |v, func, info, cx| {
+                let ea = info.target.unwrap_or(func);
+                v.session.update(cx, |_, cx| {
+                    cx.emit(crate::session::SessionEvent::OpenCodeTab {
+                        kind: ViewKind::Pseudocode,
+                        ea,
+                    })
+                });
+            });
+        } else if ev.click_count >= 2 {
             self.follow(cx);
         } else {
             self.sync_cursor(cx);

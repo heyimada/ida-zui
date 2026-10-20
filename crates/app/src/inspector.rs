@@ -164,6 +164,12 @@ pub fn prototype_runs(
 }
 
 impl Inspector {
+    /// The graph whose block the inspector describes (the one in front).
+    pub fn set_graph(&mut self, graph: Entity<GraphView>, cx: &mut Context<Self>) {
+        self.graph = graph;
+        cx.notify();
+    }
+
     pub fn new(
         session: Entity<Session>,
         focus: Entity<Focus>,

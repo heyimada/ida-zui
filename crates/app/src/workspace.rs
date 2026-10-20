@@ -4,6 +4,7 @@
 mod chrome;
 mod debug;
 mod edit;
+mod tabs;
 
 use crate::actions::*;
 use crate::bottom::{BottomEvent, BottomPanel, BottomTab};
@@ -26,7 +27,7 @@ use crate::plugins_view::{PluginsView, RunRequested};
 use crate::proximity_view::ProximityView;
 use crate::pseudo::PseudoView;
 use crate::script_dialog::ScriptDialog;
-use crate::session::{Phase, Session, SessionEvent, SubmitFn};
+use crate::session::{Phase, Session, SessionEvent, SubmitFn, ViewKind};
 use crate::settings;
 use crate::settings_view::{Section, SettingsView};
 use crate::sidebar::{Sidebar, Tab};
@@ -324,6 +325,9 @@ impl Workspace {
                 self.show_xref_list(title.clone(), rows.clone(), window, cx)
             }
             SessionEvent::OpenDoc(key) if active => self.open_doc(key.clone(), window, cx),
+            SessionEvent::OpenCodeTab { kind, ea } if active => {
+                self.open_code_tab(*kind, *ea, true, window, cx)
+            }
             SessionEvent::DebugStopped => self.on_debug_stopped(ix, cx),
             SessionEvent::Rebased { delta } => {
                 // Editor tabs that hold addresses follow the move.
@@ -467,13 +471,21 @@ impl Workspace {
         db.pseudo.update(cx, |p, cx| p.set_visible(pseudo, cx));
         db.graph.update(cx, |g, cx| g.set_visible(graph, cx));
         db.hex.update(cx, |h, _| h.visible = hex);
-        db.inspector.update(cx, |i, cx| {
-            i.block_mode = graph;
-            cx.notify();
-        });
+        Self::sync_code_tabs(db, cx);
+        Self::sync_drive(db, cx);
     }
 
     fn set_mode(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        // A code tab in front is retargeted; the main view is switched otherwise.
+        let kind = match mode {
+            Mode::Linear => ViewKind::Listing,
+            Mode::Graph => ViewKind::Graph,
+            Mode::Hex => ViewKind::Hex,
+            Mode::Pseudo => ViewKind::Pseudocode,
+        };
+        if self.retarget_code_tab(kind, window, cx) {
+            return;
+        }
         self.tab_back = None;
         self.mode = mode;
         self.doc = None;
@@ -798,6 +810,7 @@ impl Workspace {
                 self.plugin_run_subs.push(run);
                 (DocView::Plugins(v), SharedString::from("Plugins"), sub)
             }
+            DocKey::Code(_) => return,
             DocKey::Proximity(func) => {
                 let func = *func;
                 let name = self
@@ -2745,9 +2758,14 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|w, _: &SwitchDatabase9, window, cx| w.activate_nth(8, window, cx)),
             )
-            .on_action(cx.listener(|w, _: &ToggleHideCasts, _, cx| {
-                w.pseudo.update(cx, |p, cx| p.toggle_hide_casts(cx))
-            }))
+            .on_action(
+                cx.listener(|w, _: &ToggleHideCasts, _, cx| match w.front_code() {
+                    Some((_, crate::docs::CodeView::Pseudo(p))) => {
+                        p.update(cx, |p, cx| p.toggle_hide_casts(cx))
+                    }
+                    _ => w.pseudo.update(cx, |p, cx| p.toggle_hide_casts(cx)),
+                }),
+            )
             .on_action(cx.listener(|w, _: &ToggleMinimap, _, cx| {
                 w.graph.update(cx, |g, cx| g.toggle_minimap(cx))
             }))
@@ -2785,6 +2803,24 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &PrevFunction, _, cx| w.step_function(false, cx)))
             .on_action(cx.listener(|w, _: &ResetLayout, window, cx| w.reset_layout(window, cx)))
             .on_action(cx.listener(|w, _: &MarkPosition, _, cx| w.mark_position(cx)))
+            .on_action(cx.listener(|w, _: &NewListingTab, window, cx| {
+                w.new_tab_here(ViewKind::Listing, window, cx)
+            }))
+            .on_action(cx.listener(|w, _: &NewGraphTab, window, cx| {
+                w.new_tab_here(ViewKind::Graph, window, cx)
+            }))
+            .on_action(
+                cx.listener(|w, _: &NewHexTab, window, cx| {
+                    w.new_tab_here(ViewKind::Hex, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|w, _: &NewPseudoTab, window, cx| {
+                w.new_tab_here(ViewKind::Pseudocode, window, cx)
+            }))
+            .on_action(cx.listener(|w, _: &OpenInNewTab, window, cx| {
+                let kind = w.active_kind().unwrap_or(ViewKind::Listing);
+                w.new_tab_here(kind, window, cx)
+            }))
             .on_action(cx.listener(|w, _: &JumpToMark, window, cx| w.jump_to_mark(window, cx)))
             .on_action(cx.listener(|w, _: &OpHexDec, _, cx| w.operand_hex_or_decimal(cx)))
             .on_action(cx.listener(|w, _: &OpHex, _, cx| w.set_operand(ida_proto::OpRepr::Hex, cx)))

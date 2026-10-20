@@ -47,6 +47,8 @@ pub struct ListingView {
     session: Entity<Session>,
     /// This view\'s identity in `SessionEvent::CursorMoved`.
     origin: Origin,
+    /// A pinned view (a tab opened with "Open in new tab") only moves on its own jumps.
+    pub pinned: bool,
     focus: FocusHandle,
     rows: Vec<Row>,
     top: f32,
@@ -87,10 +89,34 @@ pub struct ListingView {
 }
 
 impl ListingView {
+    pub fn origin(&self) -> Origin {
+        self.origin
+    }
+
+    /// Shows `ea` (a tab opened at an address).
+    pub fn jump_to(&mut self, ea: Ea, cx: &mut Context<Self>) {
+        if self.segs.total() == 0 {
+            self.load_segments(cx);
+        }
+        self.show(ea, true, cx)
+    }
+
+    /// The address this view is at (for a tab's title), when it has one.
+    pub fn current_ea(&self) -> Option<Ea> {
+        self.cursor_ea()
+    }
+
     pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
         let sub = cx.subscribe(&session, |this, _, ev, cx| match ev {
-            SessionEvent::Navigated { ea, .. } => this.show(*ea, true, cx),
-            SessionEvent::CursorMoved { ea, origin } if *origin != this.origin => {
+            SessionEvent::Navigated { ea, .. }
+                if this.session.read(cx).follows(this.origin, this.pinned) =>
+            {
+                this.show(*ea, true, cx)
+            }
+            SessionEvent::CursorMoved { ea, origin }
+                if *origin != this.origin
+                    && this.session.read(cx).follows(this.origin, this.pinned) =>
+            {
                 this.show(*ea, false, cx)
             }
             SessionEvent::Opened => this.load_segments(cx),
@@ -105,6 +131,7 @@ impl ListingView {
         });
         Self {
             session,
+            pinned: false,
             origin: Origin::new(ViewKind::Listing),
             focus: cx.focus_handle(),
             rows: Vec::new(),
@@ -601,6 +628,13 @@ impl ListingView {
         self.caret_col = col;
         self.highlight = self.token().map(Into::into);
         self.publish_cursor(cx);
+        if ev.modifiers.control
+            && let Some(ea) = self.cursor_ea()
+        {
+            commands::open_target_in_tab(&self.session, ViewKind::Listing, self.token(), ea, cx);
+            cx.notify();
+            return;
+        }
         if ev.click_count >= 2 {
             self.follow(cx);
         }

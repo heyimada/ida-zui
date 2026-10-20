@@ -124,6 +124,8 @@ pub fn listing(ops: &Ops, cx: &App) -> Vec<Entry> {
         c!(Copy, cx),
         c!(CopyWithAddresses, cx),
         c!(CopyAddress, cx),
+        Entry::Sep,
+        c!(OpenInNewTab, cx),
     ]
 }
 
@@ -140,6 +142,8 @@ pub fn pseudocode(cx: &App) -> Vec<Entry> {
         c!(Copy, cx),
         c!(CopyWithAddresses, cx),
         c!(CopyAddress, cx),
+        Entry::Sep,
+        c!(OpenInNewTab, cx),
     ]
 }
 

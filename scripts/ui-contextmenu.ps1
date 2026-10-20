@@ -15,8 +15,8 @@ $steps = @(
     # --- listing: a right click opens the menu at the click
     "rightclick:666,427", "wait:600", "shot:ctx_listing", "key:escape", "wait:300",
     # --- the Menu key opens it at the caret with the first entry highlighted;
-    #     Up wraps to the last entry, "Copy current address", and Enter runs it
-    "click:666,427", "key:menu", "wait:500", "shot:ctx_listing_kbd", "key:up", "key:enter", "wait:500",
+    #     Up wraps to the last entry ("Open in new tab"), the second Up is "Copy current address", and Enter runs it
+    "click:666,427", "key:menu", "wait:500", "shot:ctx_listing_kbd", "key:up", "key:up", "key:enter", "wait:500",
     "clipassert:1400018C0",
     # --- right-click inside a selection keeps it; outside it moves the caret
     "key:down", "key:down", "key:shift-down", "key:shift-down", "wait:300",

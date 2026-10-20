@@ -145,6 +145,23 @@ pub enum EditKind {
     Collapse,
 }
 
+/// Ctrl+click: the name under the caret (else the item itself) opens in a new
+/// code tab of `kind`.
+pub fn open_target_in_tab(
+    session: &Entity<Session>,
+    kind: crate::session::ViewKind,
+    token: Option<String>,
+    fallback: Ea,
+    cx: &mut App,
+) {
+    let s = session.clone();
+    token_target(session, token, fallback, cx, move |ea, cx| {
+        s.update(cx, |_, cx| {
+            cx.emit(crate::session::SessionEvent::OpenCodeTab { kind, ea })
+        })
+    });
+}
+
 pub fn show_xrefs(session: &Entity<Session>, ea: Ea, to: bool, cx: &mut App) {
     session.update(cx, |_, cx| {
         cx.emit(crate::session::SessionEvent::ShowXrefs { ea, to })

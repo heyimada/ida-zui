@@ -489,6 +489,18 @@ pub fn build(
                 c!(TogglePseudocode, "Switch to pseudocode pane"),
                 toggle(c!(ToggleSplit, "Split with pseudocode"), view.split),
                 toggle(c!(ToggleHideCasts, "Hide casts"), view.hide_casts),
+                Entry::Sub {
+                    label: "New tab".into(),
+                    enabled: ready,
+                    entries: vec![
+                        c!(OpenInNewTab, "Open the current view in a new tab"),
+                        Entry::Sep,
+                        c!(NewListingTab, "Disassembly"),
+                        c!(NewGraphTab, "Graph"),
+                        c!(NewHexTab, "Hex"),
+                        c!(NewPseudoTab, "Pseudocode"),
+                    ],
+                },
                 Entry::Sep,
                 Entry::Sub {
                     label: "Open subviews".into(),

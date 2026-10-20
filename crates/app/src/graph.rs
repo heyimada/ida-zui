@@ -111,6 +111,8 @@ pub struct GraphView {
     session: Entity<Session>,
     /// This view\'s identity in `SessionEvent::CursorMoved`.
     origin: Origin,
+    /// A pinned view (a tab opened with "Open in new tab") only moves on its own jumps.
+    pub pinned: bool,
     focus: FocusHandle,
     func: Option<Ea>,
     name: SharedString,
@@ -146,10 +148,31 @@ pub struct GraphView {
 }
 
 impl GraphView {
+    /// Where to show when first shown (a tab opened hidden).
+    pub fn set_wanted(&mut self, ea: Ea) {
+        self.wanted = Some(ea);
+    }
+
+    pub fn origin(&self) -> Origin {
+        self.origin
+    }
+
+    /// The address this view is at (for a tab's title), when it has one.
+    pub fn current_ea(&self) -> Option<Ea> {
+        self.cursor_ea().or(self.func)
+    }
+
     pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
         let sub = cx.subscribe(&session, |this, _, ev, cx| match ev {
-            SessionEvent::Navigated { ea, .. } => this.follow_address(*ea, true, cx),
-            SessionEvent::CursorMoved { ea, origin } if *origin != this.origin => {
+            SessionEvent::Navigated { ea, .. }
+                if this.session.read(cx).follows(this.origin, this.pinned) =>
+            {
+                this.follow_address(*ea, true, cx)
+            }
+            SessionEvent::CursorMoved { ea, origin }
+                if *origin != this.origin
+                    && this.session.read(cx).follows(this.origin, this.pinned) =>
+            {
                 this.follow_address(*ea, false, cx)
             }
             SessionEvent::Changed => {
@@ -167,6 +190,7 @@ impl GraphView {
         });
         Self {
             session,
+            pinned: false,
             origin: Origin::new(ViewKind::Graph),
             focus: cx.focus_handle(),
             func: None,
@@ -408,7 +432,7 @@ impl GraphView {
             self.pan = point(px(x), px(y));
         }
     }
-    fn cursor_ea(&self) -> Option<Ea> {
+    pub fn cursor_ea(&self) -> Option<Ea> {
         let (b, l) = self.cursor?;
         Some(self.blocks.get(b)?.lines.get(l)?.0)
     }
@@ -513,7 +537,17 @@ impl GraphView {
                     self.expand_block(b);
                 }
                 self.publish_caret(cx);
-                if ev.click_count >= 2 {
+                if ev.modifiers.control
+                    && let Some(ea) = self.cursor_ea()
+                {
+                    commands::open_target_in_tab(
+                        &self.session,
+                        ViewKind::Graph,
+                        self.token(),
+                        ea,
+                        cx,
+                    );
+                } else if ev.click_count >= 2 {
                     self.follow(cx);
                 }
             }

@@ -45,9 +45,61 @@ impl Origin {
     }
 }
 
+/// Who is driving navigation: the view the user is working in. A pinned view
+/// (a tab opened with "Open in new tab") only follows while it is the driver,
+/// and while it drives, nobody else follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Driver {
+    pub origin: Origin,
+    pub pinned: bool,
+}
+
+/// Whether a view (`view`, `pinned`) follows a jump or caret move made while
+/// `driver` is the active view.
+pub fn follows(driver: Option<Driver>, view: Origin, pinned: bool) -> bool {
+    match driver {
+        None => !pinned,
+        Some(d) => d.origin == view || (!pinned && !d.pinned),
+    }
+}
+
 #[cfg(test)]
 mod origin_tests {
     use super::*;
+
+    fn o() -> Origin {
+        Origin::new(ViewKind::Listing)
+    }
+
+    #[test]
+    fn unpinned_views_follow_each_other_and_pinned_ones_stay_put() {
+        let (a, b, pin) = (o(), o(), o());
+        let drive_a = Some(Driver {
+            origin: a,
+            pinned: false,
+        });
+        assert!(
+            follows(drive_a, b, false),
+            "a synced view follows the driver"
+        );
+        assert!(!follows(drive_a, pin, true), "a pinned view does not");
+        assert!(follows(None, b, false));
+        assert!(!follows(None, pin, true));
+    }
+
+    #[test]
+    fn while_a_pinned_view_drives_only_it_moves() {
+        let (a, pin) = (o(), o());
+        let drive_pin = Some(Driver {
+            origin: pin,
+            pinned: true,
+        });
+        assert!(follows(drive_pin, pin, true), "it follows its own jumps");
+        assert!(
+            !follows(drive_pin, a, false),
+            "the synced views stay where they are"
+        );
+    }
 
     #[test]
     fn two_views_of_one_kind_are_different_origins() {
@@ -128,6 +180,11 @@ pub enum SessionEvent {
     },
     /// Open an editor tab (local types, a structure, an enum, a stack frame).
     OpenDoc(crate::docs::DocKey),
+    /// Open a code view of this kind at `ea` in a tab of its own.
+    OpenCodeTab {
+        kind: ViewKind,
+        ea: Ea,
+    },
     ListsReloaded,
     /// The debugger state changed (process state, breakpoints, registers).
     DebugChanged,
@@ -183,6 +240,8 @@ pub struct Session {
     pub op_repr: Vec<ida_proto::OpReprRow>,
     /// The marked positions (IDA's bookmarks), for the listing gutter.
     pub marks: Vec<ida_proto::MarkRow>,
+    /// The view the user is working in (see `follows`); set by the workspace.
+    pub driver: Option<Driver>,
     /// Function and name lists, shared by the side panel and jump-anywhere.
     pub functions: Rc<Vec<ida_proto::FuncRow>>,
     pub names: Rc<Vec<ida_proto::NameRow>>,
@@ -224,6 +283,7 @@ impl Session {
             status: StatusLine::default(),
             op_repr: Vec::new(),
             marks: Vec::new(),
+            driver: None,
             functions: Rc::default(),
             names: Rc::default(),
             analysis: None,
@@ -657,6 +717,11 @@ impl Session {
         self.status.clear();
         cx.emit(SessionEvent::Navigated { ea });
         cx.notify();
+    }
+
+    /// Whether the view `origin` (pinned or not) should follow what happens now.
+    pub fn follows(&self, origin: Origin, pinned: bool) -> bool {
+        follows(self.driver, origin, pinned)
     }
 
     pub fn set_cursor(&mut self, ea: Ea, origin: Origin, cx: &mut Context<Self>) {
