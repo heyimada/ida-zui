@@ -8,7 +8,7 @@ param([string]$Work = "mark")
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $steps = @(
-    "wait:18000",
+    "wait:18000", "waitready",
     # land on `mov edx, 7530h` (1400019CF) and mark it
     "key:alt-i", "wait:500", "type:0x7530", "key:enter", "wait:1500",
     "key:alt-m", "wait:600", "shot:mark_prompt", "type:the immediate", "key:enter", "wait:1500", "shot:mark_gutter",

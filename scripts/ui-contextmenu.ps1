@@ -11,7 +11,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $kept = 'var_5F8 = byte ptr -5F8h\nvar_5D0 = byte ptr -5D0h\nvar_5B0 = byte ptr -5B0h'
 $steps = @(
-    "wait:18000",
+    "wait:18000", "waitready",
     # --- listing: a right click opens the menu at the click
     "rightclick:666,427", "wait:600", "shot:ctx_listing", "key:escape", "wait:300",
     # --- the Menu key opens it at the caret with the first entry highlighted;

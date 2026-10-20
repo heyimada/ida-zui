@@ -41,12 +41,34 @@ pub fn rename_token(session: &Entity<Session>, token: Option<String>, fallback: 
         rename_ea(session, fallback, cx);
         return;
     };
+    // A stack variable (`var_5F8 = byte ptr -5F8h`) is a member of the function's
+    // frame, not an address: IDA renames that member.
+    let func = session.read(cx).function_at(fallback).map(|f| f.start);
+    let frame = func.map(|func| session.read(cx).call(FrameInfo { func }));
     let fut = session.read(cx).call(Resolve {
-        expr: token,
+        expr: token.clone(),
         from: fallback,
     });
     let session2 = session.clone();
     cx.spawn(async move |cx| {
+        if let (Some(func), Some(frame)) = (func, frame)
+            && let Ok(info) = frame.await
+            && let Some(m) = info.members.iter().find(|m| m.name == token)
+        {
+            let (offset, current) = (m.offset, m.name.clone());
+            session2.update(cx, |s, cx| {
+                let target = cx.entity();
+                s.prompt_name(
+                    format!("Rename stack variable {current}"),
+                    current,
+                    move |new, cx| {
+                        target.update(cx, |s, cx| s.mutate(FrameRename { func, offset, new }, cx));
+                    },
+                    cx,
+                );
+            });
+            return;
+        }
         let ea = fut.await.ok().flatten().unwrap_or(fallback);
         cx.update(|cx| rename_ea(&session2, ea, cx));
     })

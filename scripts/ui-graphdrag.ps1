@@ -3,7 +3,7 @@
 param([string]$Work = "ui-graphdrag")
 $root = Split-Path $PSScriptRoot -Parent
 $steps = @(
-    "wait:16000", "action:ida::ShowGraph", "wait:3000", "shot:graphdrag_start",
+    "wait:16000", "waitready", "action:ida::ShowGraph", "wait:3000", "shot:graphdrag_start",
     # press inside the first block, then hold the pointer below the canvas
     "down:600,440", "heldmove:600,500", "heldmove:600,780", "wait:2500", "shot:graphdrag_held",
     "up:600,780", "wait:500", "shot:graphdrag_end"

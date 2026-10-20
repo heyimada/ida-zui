@@ -3,7 +3,7 @@
 param([string]$Work = "ui-tabmenu")
 $root = Split-Path $PSScriptRoot -Parent
 $steps = @(
-    "wait:16000", "action:ida::NewListingTab", "wait:1200", "action:ida::NewGraphTab", "wait:1200", "action:ida::NewHexTab", "wait:1500",
+    "wait:16000", "waitready", "action:ida::NewListingTab", "wait:1200", "action:ida::NewGraphTab", "wait:1200", "action:ida::NewHexTab", "wait:1500",
     "shot:tabmenu_0",
     # Copy title (menu items sit at fixed offsets from the click)
     "rightclick:730,120", "wait:500", "click:765,321", "wait:400", "clipassert:Listing: FIND::SearchFiles",

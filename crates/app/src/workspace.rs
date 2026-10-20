@@ -155,7 +155,13 @@ impl Workspace {
             );
         // The next command (any real key) retires the previous status message.
         let this = cx.entity().downgrade();
-        let status_sub = cx.intercept_keystrokes(move |ev, _, cx| {
+        let status_sub = cx.intercept_keystrokes(move |ev, window, cx| {
+            // Bound keys never reach the element key listeners, so the window that gets a
+            // keystroke is noted here, before the binding runs: this window's front view
+            // drives the session (a floating window handles its own in the same way).
+            if !floating::is_floating(window, cx) {
+                this.update(cx, |w, cx| w.take_input(window, cx)).ok();
+            }
             if matches!(
                 ev.keystroke.key.as_str(),
                 "shift" | "control" | "alt" | "platform" | "function"
@@ -1747,11 +1753,24 @@ impl Workspace {
     // ---- overlays ------------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
+    /// A database is open and its lists are in (the automation channel's `waitready`).
+    pub fn is_loaded(&self, cx: &App) -> bool {
+        let s = self.session.read(cx);
+        s.is_ready() && !s.functions.is_empty()
+    }
+
     /// Input in this window: it is where prompts open, and its front view drives the session.
     fn take_input(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let from_floating = floating::input_is_floating(cx);
         floating::mark_input(window, cx);
-        if from_floating {
+        // A floating window may have been driving the session (it says so in `Session::driver`);
+        // input here hands the driver back to this window's front view, which republishes
+        // its own address. Judged by the session, not by which window had input last.
+        let driver = self.session.read(cx).driver.map(|d| d.origin);
+        let floating_drives = self
+            .floating
+            .iter()
+            .any(|f| driver == Some(f.view.origin(cx)));
+        if floating_drives {
             self.sync_views(cx);
         }
     }

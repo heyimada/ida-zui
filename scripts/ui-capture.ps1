@@ -23,6 +23,7 @@
 #   clipdump           print the in-process clipboard (and log it; newlines show as \n)
 #   cliplines:<n> / cliplen:<n>  fail unless the in-process clipboard holds at least n lines / characters
 #   clipassert:<text>  like clipdump, then compare with <text> (write newlines as \n); a mismatch fails the script
+#   waitready          wait until a database is open and its lists are loaded (use after the first wait)
 #   marker:<name>      wait until the app has executed everything queued so far
 #   shot:<name>        save the window as artifacts/ui/<name>.png
 #   frameshot:<name>   the same, but the whole window including any frame the OS draws around it
@@ -222,6 +223,15 @@ try {
                 $have = if ($kind -eq "cliplines") { ([regex]::Matches($got, '\\n')).Count + 1 } else { $got.Length }
                 if ($have -ge [int]$arg) { Note "PASS ${kind}: $have >= $arg" }
                 else { Note "FAIL ${kind}: $have < $arg"; $failed = $true }
+            }
+            "waitready" {
+                # Hold the app's command queue until a database is open with its lists loaded, then wait here for it.
+                $syncName = "ready-" + [guid]::NewGuid().ToString("N")
+                Send "waitready"
+                Send "marker $syncName"
+                $done = Join-Path $work "automation.txt.done"
+                $until = (Get-Date).AddSeconds(180)
+                while ((Get-Date) -lt $until -and -not ((Test-Path $done) -and ((Get-Content $done) -contains $syncName))) { Start-Sleep -Milliseconds 200 }
             }
             "clipboard" { Send "clipboard $arg" }
             "drop" { Send "drop $arg" }

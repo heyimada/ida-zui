@@ -368,6 +368,12 @@ impl FloatingWindow {
                 MenuEvent::Invoke(_) => {}
             },
         ));
+        let (me, mine) = (cx.entity().downgrade(), window.window_handle().window_id());
+        subs.push(cx.intercept_keystrokes(move |_, window, cx| {
+            if window.window_handle().window_id() == mine {
+                me.update(cx, |f, cx| f.take_input(window, cx)).ok();
+            }
+        }));
         let focus = cx.focus_handle();
         let this = Self {
             session,
@@ -679,7 +685,7 @@ impl Render for FloatingWindow {
             .text_size(px(12.))
             .line_height(px(16.))
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| this.take_input(window, cx)))
-            .on_key_down(cx.listener(|_, _, window, cx| mark_input(window, cx)))
+            .on_key_down(cx.listener(|this, _, window, cx| this.take_input(window, cx)))
             .on_action(cx.listener(|this, _: &GoTo, window, cx| this.goto(window, cx)))
             .on_action(
                 cx.listener(|this, _: &Back, _, cx| this.session.update(cx, |s, cx| s.back(cx))),

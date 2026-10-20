@@ -4,7 +4,7 @@
 param([string]$Work = "ui-dragscroll")
 $root = Split-Path $PSScriptRoot -Parent
 $steps = @(
-    "wait:16000",
+    "wait:16000", "waitready",
     # listing: more than twice the visible rows
     "action:ida::ShowListing", "wait:1500",
     "down:700,230", "heldmove:700,300", "heldmove:700,790", "wait:3500", "shot:dragscroll_listing", "up:700,790", "wait:300",

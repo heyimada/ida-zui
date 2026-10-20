@@ -11,6 +11,7 @@
 //   dblclick <x> <y>     a click followed by the second click of a double click
 //   confirm <n>          answer button n (1-based) of an in-app question
 //   drop <path>[|<path>..]  files dropped on the window, through gpui's file-drop events (what an OS drop becomes)
+//   waitready            holds the commands behind it until a database is open with its lists loaded
 //   marker <name>        appends <name> to <file>.done
 //   clipboard <text>     seeds the in-process clipboard (the system one is never used)
 //   (open_url: Help > Documentation and Report an issue append `url: <url>` to <file>.done instead of opening a browser)
@@ -66,6 +67,26 @@ pub fn start(path: PathBuf, handle: AnyWindowHandle, cx: &mut App) {
                 }
             }
             if let Some(line) = pending.pop() {
+                // `waitready`: the commands behind it wait until the database is open and its
+                // lists have arrived (a fixed wait is too short on a busy machine).
+                if line.trim() == "waitready" {
+                    let ready = cx
+                        .update_window(handle, |_, window, cx| {
+                            window
+                                .root::<crate::workspace::Workspace>()
+                                .flatten()
+                                .is_some_and(|w| w.read(cx).is_loaded(cx))
+                        })
+                        .unwrap_or(false);
+                    if !ready {
+                        pending.push(line);
+                        continue;
+                    }
+                    cx.background_executor()
+                        .timer(Duration::from_millis(1500))
+                        .await;
+                    continue;
+                }
                 let done_path = path.clone();
                 // `@<n> <command>` targets a floating window (1-based, in opening order).
                 let (target, line) = match line.strip_prefix('@').and_then(|l| l.split_once(' ')) {

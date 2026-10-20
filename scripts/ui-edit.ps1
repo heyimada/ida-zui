@@ -11,7 +11,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 function Line($expect) { @("key:ctrl-c", "wait:300", "clipassert:$expect") }
 $steps = @(
-    "wait:18000",
+    "wait:18000", "waitready",
     "files:find.exe",
     # --- operands on `mov edx, 7530h` (found by its immediate; the caret goes on 7530h)
     "key:alt-i", "wait:500", "type:0x7530", "key:enter", "wait:1500", "click:856,368", "wait:800",

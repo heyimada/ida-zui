@@ -7,7 +7,7 @@
 param([string]$Work = "ui-float")
 $root = Split-Path $PSScriptRoot -Parent
 $steps = @(
-    "wait:18000",
+    "wait:18000", "waitready",
     # the pseudocode of main becomes a window
     "action:ida::NewPseudoTab", "wait:2500", "action:ida::MoveToNewWindow", "wait:3500",
     "shot:float_main", "win:1", "shot:float_window",
@@ -29,7 +29,7 @@ $global:LASTEXITCODE = 0
 & "$root\scripts\ui-capture.ps1" -Work $Work -Goto "main" -Log float -Steps $steps
 $code = $LASTEXITCODE
 $steps2 = @(
-    "wait:12000", "shot:float_restored_main", "win:1", "shot:float_restored",
+    "wait:12000", "waitready", "shot:float_restored_main", "win:1", "shot:float_restored",
     # a second window, a listing: the structure chooser opens in it
     "win:0", "action:ida::NewListingTab", "wait:2000", "action:ida::MoveToNewWindow", "wait:3000",
     "win:2", "action:ida::OpStructOffset", "wait:2000", "shot:float_chooser", "win:1", "shot:float_chooser_other", "win:2", "key:escape", "wait:400",

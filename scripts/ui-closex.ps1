@@ -4,7 +4,7 @@
 param([string]$Work = "closex", [string]$Exe = "")
 $root = Split-Path $PSScriptRoot -Parent
 $steps = @(
-    "wait:16000", "key:n", "wait:400", "type:closex_dirty", "key:enter", "wait:1500",
+    "wait:16000", "waitready", "key:n", "wait:400", "type:closex_dirty", "key:enter", "wait:1500",
     "click:1455,20", "wait:1500", "shot:closex_prompt", "confirm:1", "waitexit:30000"
 )
 $opts = @{ Work = $Work; Goto = "main"; Log = "closex"; Steps = $steps }

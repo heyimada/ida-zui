@@ -10,7 +10,7 @@ param([string]$Work = "panes")
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $steps = @(
-    "wait:18000", "action:ida::ToggleSplit", "wait:3000", "shot:panes_split",
+    "wait:18000", "waitready", "action:ida::ToggleSplit", "wait:3000", "shot:panes_split",
     # a jump moves both panes (listing left, pseudocode right)
     "key:g", "wait:300", "type:SearchFiles", "key:enter", "wait:3000", "shot:panes_followed",
     # a pinned tab in the focused pane has its own history
@@ -38,6 +38,6 @@ $code = $LASTEXITCODE
 # Second start on the same settings (no --goto): the panes and the tabs come back
 # where they were.
 $global:LASTEXITCODE = 0
-& "$root\scripts\ui-capture.ps1" -Work $Work -Reuse -Log panes2 -Steps @("wait:9000", "shot:panes_restored", "dblclick:700,400", "wait:800", "shot:panes_reset")
+& "$root\scripts\ui-capture.ps1" -Work $Work -Reuse -Log panes2 -Steps @("wait:9000", "waitready", "shot:panes_restored", "dblclick:700,400", "wait:800", "shot:panes_reset")
 if ($LASTEXITCODE -ne 0) { $code = 1 }
 exit $code

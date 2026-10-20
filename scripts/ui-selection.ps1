@@ -10,7 +10,7 @@ $root = Split-Path $PSScriptRoot -Parent
 $vars3 = 'var_630 = qword ptr -630h\nvar_620 = byte ptr -620h\nvar_5F8 = byte ptr -5F8h'
 $vars3addr = '1400018C0  var_630 = qword ptr -630h\n1400018C0  var_620 = byte ptr -620h\n1400018C0  var_5F8 = byte ptr -5F8h'
 $steps = @(
-    "wait:18000",
+    "wait:18000", "waitready",
     # --- listing: Shift+arrows, with addresses, Esc clears (and only that), drag, Shift+click
     "key:down", "key:down", "key:down", "key:shift-down", "key:shift-down", "wait:300", "shot:sel_listing",
     "key:ctrl-c", "wait:300", "clipassert:$vars3",

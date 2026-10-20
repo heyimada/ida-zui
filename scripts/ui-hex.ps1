@@ -9,7 +9,7 @@ param([string]$Work = "hexv")
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $steps = @(
-    "wait:18000", "action:ida::ShowHex", "wait:1500", "shot:hexv_header",
+    "wait:18000", "waitready", "action:ida::ShowHex", "wait:1500", "shot:hexv_header",
     # the group control (the "2" button): bytes in pairs
     "click:1115,173", "wait:600", "shot:hexv_group2", "click:1157,173", "wait:600",
     # F2: a half-typed byte, then three bytes, applied with Enter

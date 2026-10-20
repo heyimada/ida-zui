@@ -12,7 +12,7 @@ $root = Split-Path $PSScriptRoot -Parent
 # Down x4 from a fresh right-click menu is "Copy name" (Jump, Cross references, Rename, Copy name).
 $copyName = @("rightclick:100,204", "wait:600", "key:down", "key:down", "key:down", "key:down", "key:enter", "wait:500")
 $steps = @(
-    "wait:18000", "shot:tab_functions",
+    "wait:18000", "waitready", "shot:tab_functions",
     # Length ascending: by value, so 2 comes before 3, 6 and 0x10 (as text, "10" would lead)
     "click:392,180", "wait:700", "shot:tab_length_asc") + $copyName + @("clipassert:_guard_dispatch_icall_nop",
     # Start descending: the highest address first
@@ -33,6 +33,6 @@ $code = $LASTEXITCODE
 # Second start on the same settings: the sort, the widths and the collapsed
 # strip are still there.
 $global:LASTEXITCODE = 0
-& "$root\scripts\ui-capture.ps1" -Work $Work -Reuse -Goto "FIND::Initialize" -Log tables2 -Steps @("wait:9000", "shot:tab_restored")
+& "$root\scripts\ui-capture.ps1" -Work $Work -Reuse -Goto "FIND::Initialize" -Log tables2 -Steps @("wait:9000", "waitready", "shot:tab_restored")
 if ($LASTEXITCODE -ne 0) { $code = 1 }
 exit $code
