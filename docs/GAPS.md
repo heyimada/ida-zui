@@ -22,7 +22,7 @@ Nothing open: S1 to S4 are resolved (see Phase 8a below).
 
 | # | Gap | Source | Pri | Suggested fix |
 |---|---|---|---|---|
-| E4 | IME composition in the code editor and text inputs is untested, for example Japanese or German dead keys. | 3 | P2 | Test it manually once on a real keyboard. The automation channel bypasses IME. |
+| E4 | IME composition in the code editor and text inputs is untested, for example Japanese or German dead keys. | 3 | P2 | Test it manually once on a real keyboard. The automation channel bypasses IME. Code review: both `TextInput` and the zui-editor `Editor` implement the full `EntityInputHandler` composition protocol (marked range, `replace_and_mark_text_in_range`, `unmark_text`, `bounds_for_range` for the candidate window), following gpui's reference input; what is unverified is only the platform path. |
 
 ## Python console
 
