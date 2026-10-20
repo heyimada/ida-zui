@@ -658,7 +658,7 @@ int izs_graph(ea_t ea)
 }
 
 //--------------------------------------------------------------------------
-static cfuncptr_t decompile_at(ea_t ea, qstring *err)
+static cfuncptr_t decompile_at(ea_t ea, qstring *err, bool fresh = false)
 {
   func_t *pfn = get_func(ea);
   if ( pfn == nullptr )
@@ -667,13 +667,31 @@ static cfuncptr_t decompile_at(ea_t ea, qstring *err)
     return cfuncptr_t(nullptr);
   }
   hexrays_failure_t hf;
-  cfuncptr_t cf = decompile(pfn, &hf, DECOMP_NO_WAIT);
+  cfuncptr_t cf = decompile(pfn, &hf, DECOMP_NO_WAIT | (fresh ? DECOMP_NO_CACHE : 0));
   if ( cf == nullptr )
     err->sprnt("%a: %s", hf.errea, hf.desc().c_str());
   return cf;
 }
 
-int izs_decompile(ea_t ea)
+// Prints the pseudocode without casts, the effect of Hex-Rays' `\` key. The
+// SDK has no print option for it, so a fresh decompilation (never the cached
+// object the other requests share) has its casts replaced by their operands.
+struct cast_hider_t : public ctree_visitor_t
+{
+  cast_hider_t() : ctree_visitor_t(CV_FAST) {}
+  int idaapi visit_expr(cexpr_t *e) override
+  {
+    while ( e->op == cot_cast && e->x != nullptr )
+    {
+      // The operand is a child of `e`: replace_by abandons the children and
+      // deletes its argument, so hand it a copy.
+      e->replace_by(new cexpr_t(*e->x));
+    }
+    return 0;
+  }
+};
+
+int izs_decompile(ea_t ea, bool hide_casts)
 {
   REQUIRE_DB();
   GUARD_BEGIN
@@ -685,7 +703,13 @@ int izs_decompile(ea_t ea)
   j.kv("func", (uint64_t)(pfn != nullptr ? pfn->start_ea : ea));
   j.kv("name", pfn != nullptr ? short_name(pfn->start_ea) : std::string());
   qstring err;
-  cfuncptr_t cf = decompile_at(ea, &err);
+  cfuncptr_t cf = decompile_at(ea, &err, hide_casts);
+  if ( cf != nullptr && hide_casts )
+  {
+    cast_hider_t hider;
+    hider.apply_to(&cf->body, nullptr);
+    cf->refresh_func_ctext();
+  }
   j.key("lines").arr();
   if ( cf != nullptr )
   {

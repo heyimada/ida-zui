@@ -135,6 +135,11 @@ methods! {
     /// Control-flow graph of the function containing `ea`.
     Graph = "graph" { ea: Ea } -> FlowGraph;
     Decompile = "decompile" { ea: Ea } -> Pseudocode;
+    /// `decompile` with options. `hide_casts` prints the pseudocode without
+    /// casts (Hex-Rays' `\` key) from a fresh decompilation; the cached one that
+    /// `decompile`, `pseudo_item` and the variable edits use is never changed,
+    /// so the ctree item indexes of such a reply do not match `pseudo_item`.
+    DecompileOpts = "decompile_opts" { ea: Ea, hide_casts: bool } -> Pseudocode;
     /// What a pseudocode anchor (ctree item index) refers to.
     PseudoItem = "pseudo_item" { func: Ea, item: u64 } -> ItemInfo;
     RenameLvar = "rename_lvar" { func: Ea, old: String, new: String } -> ();

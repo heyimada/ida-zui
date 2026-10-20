@@ -89,7 +89,7 @@ mod ffi {
         pub fn izs_listing_down(ea: Ea, count: u32) -> i32;
         pub fn izs_listing_up(ea: Ea, count: u32) -> i32;
         pub fn izs_graph(ea: Ea) -> i32;
-        pub fn izs_decompile(ea: Ea) -> i32;
+        pub fn izs_decompile(ea: Ea, hide_casts: bool) -> i32;
         pub fn izs_pseudo_item(func: Ea, anchor: u64) -> i32;
         pub fn izs_rename_lvar(func: Ea, old: *const c_char, new: *const c_char) -> i32;
         pub fn izs_set_lvar_type(func: Ea, name: *const c_char, decl: *const c_char) -> i32;
@@ -395,7 +395,11 @@ fn dispatch(method: &str, params: &str) -> Result<String, String> {
                 ffi::izs_listing_up(m.ea, m.count)
             }
             Graph::NAME => ffi::izs_graph(p::<Graph>(params)?.ea),
-            Decompile::NAME => ffi::izs_decompile(p::<Decompile>(params)?.ea),
+            Decompile::NAME => ffi::izs_decompile(p::<Decompile>(params)?.ea, false),
+            DecompileOpts::NAME => {
+                let m: DecompileOpts = p(params)?;
+                ffi::izs_decompile(m.ea, m.hide_casts)
+            }
             PseudoItem::NAME => {
                 let m: PseudoItem = p(params)?;
                 ffi::izs_pseudo_item(m.func, m.item)

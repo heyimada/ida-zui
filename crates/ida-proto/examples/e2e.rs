@@ -1941,6 +1941,100 @@ fn operand_representation(
     }
 }
 
+/// Casts the pseudocode of the sample usually contains.
+const CASTS: [&str; 8] = [
+    "(unsigned int)",
+    "(char *)",
+    "(__int64)",
+    "(unsigned __int64)",
+    "(_QWORD)",
+    "(_DWORD)",
+    "(_BYTE *)",
+    "(unsigned __int8)",
+];
+
+fn pseudo_text(p: &Pseudocode) -> Vec<String> {
+    p.lines.iter().map(|l| tags::strip(l)).collect()
+}
+
+/// `\` (hide casts): the option removes casts from a fresh decompilation, and the
+/// decompilation everything else shares keeps them.
+fn hide_casts(c: &Client, funcs: &[FuncRow], out: &mut String, check: &mut impl FnMut(bool, &str)) {
+    writeln!(
+        out,
+        "
+== hide casts"
+    )
+    .unwrap();
+    let mut pick = None;
+    for f in funcs.iter().filter(|f| !f.library && !f.thunk).take(60) {
+        let Ok(p) = c.call_blocking(Decompile { ea: f.start }) else {
+            continue;
+        };
+        let text = pseudo_text(&p);
+        if let Some(cast) = CASTS.iter().find(|k| text.iter().any(|l| l.contains(**k))) {
+            pick = Some((f.start, *cast, text));
+            break;
+        }
+    }
+    let Some((ea, cast, normal)) = pick else {
+        check(false, "a function whose pseudocode contains a cast exists");
+        return;
+    };
+    let count = |t: &[String]| {
+        t.iter()
+            .map(|l| CASTS.iter().map(|k| l.matches(*k).count()).sum::<usize>())
+            .sum::<usize>()
+    };
+    let shown = normal.iter().find(|l| l.contains(cast)).unwrap().trim();
+    let hidden = c
+        .call_blocking(DecompileOpts {
+            ea,
+            hide_casts: true,
+        })
+        .unwrap();
+    let hidden_text = pseudo_text(&hidden);
+    let again = pseudo_text(&c.call_blocking(Decompile { ea }).unwrap());
+    let plain = pseudo_text(
+        &c.call_blocking(DecompileOpts {
+            ea,
+            hide_casts: false,
+        })
+        .unwrap(),
+    );
+    writeln!(
+        out,
+        "{ea:#x} cast {cast}: {} cast(s) normally, {} with hide_casts
+  normal: {shown}",
+        count(&normal),
+        count(&hidden_text)
+    )
+    .unwrap();
+    if let Some(l) = normal
+        .iter()
+        .zip(&hidden_text)
+        .find(|(a, b)| a != b && a.contains(cast))
+    {
+        writeln!(out, "  hidden: {}", l.1.trim()).unwrap();
+    }
+    check(
+        hidden.error.is_none() && !hidden_text.is_empty(),
+        "decompile_opts with hide_casts decompiles",
+    );
+    check(
+        count(&normal) > 0 && count(&hidden_text) == 0,
+        "hide_casts removes the casts the normal pseudocode shows",
+    );
+    check(
+        !hidden_text.iter().any(|l| l.contains(cast)),
+        "hide_casts leaves the sample cast out of the text",
+    );
+    check(
+        again == normal && plain == normal,
+        "a normal decompile after hide_casts still shows the casts (the cache is untouched)",
+    );
+}
+
 fn arrays_and_strings(
     c: &Client,
     strings: &[StrRow],
@@ -3799,6 +3893,9 @@ fn main() {
         &mut check,
     );
     eprintln!("[{:6.1}s] types and frames", t0.elapsed().as_secs_f32());
+    if info.hexrays {
+        hide_casts(&client, &funcs, &mut out, &mut check);
+    }
 
     // Listing options: the instruction column of the generated lines follows
     // set_listing_options; the original value is restored afterwards.
