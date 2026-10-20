@@ -53,6 +53,18 @@ static std::string demangled_short(const char *name)
   return qs(out);
 }
 
+// Pseudocode without casts, one per recently shown function. An entry is only
+// good while Hex-Rays still hands out the very object it was built from
+// (`normal`): its own cache is dropped on every edit that matters, and holding
+// the pointer here keeps that object from being freed and its address reused.
+struct hidden_entry_t
+{
+  ea_t start;
+  cfuncptr_t normal;
+  cfuncptr_t hidden;
+};
+static std::vector<hidden_entry_t> g_hidden;
+
 static std::string seg_prefix(ea_t ea)
 {
   qstring segname;
@@ -334,6 +346,7 @@ void izs_close(bool save)
     // End a debugging session first: it leaves the database rebased.
     if ( !dbg_shutdown() )
       save = false;
+    g_hidden.clear();
     if ( g_hexrays )
       term_hexrays_plugin();
     ev_unhook_idb();
@@ -691,6 +704,32 @@ struct cast_hider_t : public ctree_visitor_t
   }
 };
 
+// The cfunc the pseudocode requests read: Hex-Rays' own (cached, shared with
+// every edit) one, or the cast-free copy of it.
+static cfuncptr_t decompile_view(ea_t ea, bool hide_casts, qstring *err)
+{
+  cfuncptr_t normal = decompile_at(ea, err);
+  if ( normal == nullptr || !hide_casts )
+    return normal;
+  const ea_t start = get_func(ea)->start_ea;
+  for ( const hidden_entry_t &h : g_hidden )
+    if ( h.start == start && h.normal.operator->() == normal.operator->() )
+      return h.hidden;
+  cfuncptr_t fresh = decompile_at(ea, err, true);
+  if ( fresh == nullptr )
+    return fresh;
+  cast_hider_t hider;
+  hider.apply_to(&fresh->body, nullptr);
+  fresh->refresh_func_ctext();
+  g_hidden.erase(std::remove_if(g_hidden.begin(), g_hidden.end(),
+                                [&](const hidden_entry_t &h) { return h.start == start; }),
+                 g_hidden.end());
+  if ( g_hidden.size() >= 8 )
+    g_hidden.erase(g_hidden.begin());
+  g_hidden.push_back({ start, normal, fresh });
+  return fresh;
+}
+
 int izs_decompile(ea_t ea, bool hide_casts)
 {
   REQUIRE_DB();
@@ -703,13 +742,7 @@ int izs_decompile(ea_t ea, bool hide_casts)
   j.kv("func", (uint64_t)(pfn != nullptr ? pfn->start_ea : ea));
   j.kv("name", pfn != nullptr ? short_name(pfn->start_ea) : std::string());
   qstring err;
-  cfuncptr_t cf = decompile_at(ea, &err, hide_casts);
-  if ( cf != nullptr && hide_casts )
-  {
-    cast_hider_t hider;
-    hider.apply_to(&cf->body, nullptr);
-    cf->refresh_func_ctext();
-  }
+  cfuncptr_t cf = decompile_view(ea, hide_casts, &err);
   j.key("lines").arr();
   if ( cf != nullptr )
   {
@@ -782,14 +815,14 @@ static void emit_lvar(Json &j, const lvar_t &v)
   j.kv("lvar", qs(v.name)).kv("lvar_type", qs(type));
 }
 
-int izs_pseudo_item(ea_t func, uint64 anchor)
+int izs_pseudo_item(ea_t func, uint64 anchor, bool hide_casts)
 {
   REQUIRE_DB();
   GUARD_BEGIN
   if ( !g_hexrays )
     return fail("the Hex-Rays decompiler is not available");
   qstring err;
-  cfuncptr_t cf = decompile_at(func, &err);
+  cfuncptr_t cf = decompile_view(func, hide_casts, &err);
   if ( cf == nullptr )
     return fail("%s", err.c_str());
   cf->get_pseudocode(); // fills treeitems

@@ -142,6 +142,9 @@ methods! {
     DecompileOpts = "decompile_opts" { ea: Ea, hide_casts: bool } -> Pseudocode;
     /// What a pseudocode anchor (ctree item index) refers to.
     PseudoItem = "pseudo_item" { func: Ea, item: u64 } -> ItemInfo;
+    /// `pseudo_item` for the lines of `decompile_opts`: with `hide_casts` the
+    /// anchor is looked up in the cast-free tree those lines came from.
+    PseudoItemOpts = "pseudo_item_opts" { func: Ea, item: u64, hide_casts: bool } -> ItemInfo;
     RenameLvar = "rename_lvar" { func: Ea, old: String, new: String } -> ();
     SetLvarType = "set_lvar_type" { func: Ea, name: String, decl: String } -> ();
 

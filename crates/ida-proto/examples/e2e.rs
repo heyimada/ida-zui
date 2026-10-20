@@ -1973,11 +1973,11 @@ fn hide_casts(c: &Client, funcs: &[FuncRow], out: &mut String, check: &mut impl 
         };
         let text = pseudo_text(&p);
         if let Some(cast) = CASTS.iter().find(|k| text.iter().any(|l| l.contains(**k))) {
-            pick = Some((f.start, *cast, text));
+            pick = Some((f.start, *cast, text, p));
             break;
         }
     }
-    let Some((ea, cast, normal)) = pick else {
+    let Some((ea, cast, normal, normal_pc)) = pick else {
         check(false, "a function whose pseudocode contains a cast exists");
         return;
     };
@@ -2032,6 +2032,121 @@ fn hide_casts(c: &Client, funcs: &[FuncRow], out: &mut String, check: &mut impl 
     check(
         again == normal && plain == normal,
         "a normal decompile after hide_casts still shows the casts (the cache is untouched)",
+    );
+
+    // Clicks: the names on the line that lost its cast resolve the same way in
+    // both trees (the anchors of the hidden reply index the hidden tree).
+    let line_ix = normal.iter().position(|l| l.contains(cast)).unwrap();
+    let resolve = |tagged: &str, hide: bool| -> Vec<(String, Option<Ea>, Option<String>)> {
+        let parsed = tags::parse(tagged);
+        let mut found = Vec::new();
+        for run in &parsed.runs {
+            let word = parsed.text[run.range.clone()].to_owned();
+            if !word.starts_with(|ch: char| ch.is_alphabetic() || ch == '_') {
+                continue;
+            }
+            let Some(anchor) = parsed.anchor_at(run.range.start) else {
+                continue;
+            };
+            let item = if hide {
+                c.call_blocking(PseudoItemOpts {
+                    func: ea,
+                    item: anchor,
+                    hide_casts: true,
+                })
+            } else {
+                c.call_blocking(PseudoItem {
+                    func: ea,
+                    item: anchor,
+                })
+            }
+            .unwrap();
+            found.push((word, item.target, item.lvar));
+        }
+        found
+    };
+    let hidden_line = hidden
+        .lines
+        .iter()
+        .find(|l| {
+            let t = tags::strip(l);
+            t.trim() == shown.replace(cast, "").trim()
+                || t.trim() == shown.replacen(cast, "", 1).trim()
+        })
+        .cloned();
+    let normal_hits = resolve(&normal_pc.lines[line_ix], false);
+    let hidden_hits = hidden_line
+        .as_deref()
+        .map(|l| resolve(l, true))
+        .unwrap_or_default();
+    writeln!(
+        out,
+        "  clicks normal: {normal_hits:?}
+  clicks hidden: {hidden_hits:?}"
+    )
+    .unwrap();
+    let resolved = hidden_hits
+        .iter()
+        .filter(|(_, t, v)| t.is_some() || v.is_some())
+        .count();
+    check(
+        hidden_line.is_some() && resolved > 0,
+        "names on the line that lost its cast resolve to an object or variable in hidden mode",
+    );
+    check(
+        hidden_hits
+            .iter()
+            .filter(|(_, t, v)| t.is_some() || v.is_some())
+            .all(|(w, t, v)| {
+                normal_hits
+                    .iter()
+                    .any(|(nw, nt, nv)| nw == w && nt == t && nv == v)
+            }),
+        "hidden-mode clicks resolve to the same ea or variable as in normal mode",
+    );
+    // The cast-free tree follows edits: a renamed variable shows in it at once.
+    if let Some((_, _, Some(var))) = hidden_hits.iter().find(|(_, _, v)| v.is_some()) {
+        let hidden_with = |c: &Client| {
+            pseudo_text(
+                &c.call_blocking(DecompileOpts {
+                    ea,
+                    hide_casts: true,
+                })
+                .unwrap(),
+            )
+        };
+        c.call_blocking(RenameLvar {
+            func: ea,
+            old: var.clone(),
+            new: "e2e_hc_renamed".into(),
+        })
+        .unwrap();
+        let renamed = hidden_with(c);
+        c.call_blocking(RenameLvar {
+            func: ea,
+            old: "e2e_hc_renamed".into(),
+            new: var.clone(),
+        })
+        .unwrap();
+        let restored = hidden_with(c);
+        check(
+            renamed.iter().any(|l| l.contains("e2e_hc_renamed"))
+                && !restored.iter().any(|l| l.contains("e2e_hc_renamed"))
+                && count(&restored) == 0,
+            "the cast-free pseudocode follows a variable rename and its undo",
+        );
+    }
+    check(
+        c.call_blocking(PseudoItem {
+            func: ea,
+            item: normal_pc
+                .lines
+                .iter()
+                .find_map(|l| tags::parse(l).anchors.first().map(|a| a.value))
+                .unwrap(),
+        })
+        .is_ok(),
+        "normal clicks still resolve after hidden-mode clicks",
     );
 }
 
