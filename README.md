@@ -78,7 +78,7 @@ The defaults follow IDA's `cfg/idagui.cfg` where IDA has a key. Every key is edi
 | Follow | `Enter` | `Enter`, double-click (on a mnemonic it follows the first name of the line) |
 | Xrefs to / from | `X`, `Ctrl+X` / `Ctrl+J` | same (plus `Shift+X` for from) |
 | Rename | `N` | `N` |
-| Comment / repeatable comment | `:` / `;` | `Shift+;` (that is `:` on a US layout) / `;` |
+| Comment / repeatable comment | `:` / `;` | same (`:` works on any keyboard layout) |
 | Graph / linear | `Space` | `Space` |
 | Pseudocode | `F5`, `Tab` | `F5`, `Tab` |
 | Search text / bytes, again | `Alt+T` / `Alt+B`, `Ctrl+T` / `Ctrl+B` | same |
@@ -199,7 +199,7 @@ IDA's defaults are used where IDA has one.
 | `Tab` / `F5` | Open pseudocode, or switch focus between the panes |
 | `Ctrl+Shift+H` / `Ctrl+Shift+D` | Hex view / disassembly |
 | `N` | Rename (a local variable in pseudocode) |
-| `Shift+;` (`:`) / `;` | Comment / repeatable comment (IDA's assignment) |
+| `:` / `;` | Comment / repeatable comment (IDA's assignment) |
 | `Y` | Set the type (a function prototype, or a local variable's type in pseudocode) |
 | `X` / `Shift+X` | Cross references to / from |
 | `C` `D` `A` `U` `P` | Make code, cycle data size, make string, undefine, create function |

@@ -33,7 +33,6 @@ Nothing open: S1 to S4 are resolved (see Phase 8a below).
 
 | # | Gap | Source | Pri | Suggested fix |
 |---|---|---|---|---|
-| M2 | A real mouse click on the database chips in the title strip (the custom drag region) is untested. | 4 | P1 | Test by hand. Make sure the chips aren't part of the OS caption hit-test area. |
 
 ## Debugger
 
@@ -62,7 +61,9 @@ Nothing open: S1 to S4 are resolved (see Phase 8a below).
 - **H2:** list sections of the E2E dump are capped at 200 entries plus the count (not re-run on shell32.dll).
 - **Proximity, off-screen nodes (L8 leftover):** after a + expansion or opening a "+N more" chip the view pans, and zooms out down to 30% if needed, until the new nodes and their anchor are in view (it does nothing when they already are). Screenshots: expanding `__mainCRTStartup`'s callees, and opening the callee chip of `FIND::Initialize`.
 - **Proximity, Data nodes:** data nodes did render (yellow strip, listed in the legend) but never made the per-node fan-out cut, because functions filled it. The host now gives data targets a quota of their own (a third of the fan-out) when Data is on. Screenshots with Data on: `asc_140004504`, `aI`, `aV`, `aC` and `__xi_z`, `__native_startup_state` appear with the data colour, after opening the chip or expanding.
-- Left for a human: **E4** (IME) and **M2** (real mouse on the title chips); nothing in 8b touches either.
+- **M2 title chips:** clicking the sort.exe and find.exe chips switches databases (in-app mouse events, screenshots m2_sort/m2_find). The chips are siblings of the `Drag` control areas, never inside one, so the OS hit-test treats them as client area.
+- **Comment key on any layout:** `:` is bound by character, so it fires whichever physical key types it (checked with a simulated German-layout Shift+.; screenshot colon_de).
+- Left for a human: **E4** (IME composition).
 
 ## Resolved in Phase 8a
 

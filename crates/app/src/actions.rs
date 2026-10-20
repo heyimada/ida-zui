@@ -265,7 +265,7 @@ pub fn catalog() -> &'static [Command] {
             cmd!(AddField, "Editing", "Add field / member", db: true, palette: true, "structure enum frame variable insert", &[("insert", CV)]),
             cmd!(DeleteMember, "Editing", "Delete member", db: true, palette: true, "structure enum frame variable remove", &[("delete", CV)]),
             cmd!(Rename, "Editing", "Rename", db: true, palette: true, "name label symbol", &[("n", CV)]),
-            cmd!(Comment, "Editing", "Comment", db: true, palette: true, "note", &[("shift-;", CV)]),
+            cmd!(Comment, "Editing", "Comment", db: true, palette: true, "note", &[(":", CV), ("shift-;", CV)]),
             cmd!(RepeatableComment, "Editing", "Repeatable comment", db: true, palette: true, "note", &[(";", CV)]),
             cmd!(SetType, "Editing", "Set type", db: true, palette: true, "prototype signature declaration", &[("y", CV)]),
             cmd!(MakeCode, "Editing", "Make code", db: true, palette: true, "disassemble convert", &[("c", CV)]),
