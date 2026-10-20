@@ -11,7 +11,7 @@ param([string]$Work = "tabs")
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $steps = @(
-    "wait:18000", "key:tab", "wait:2500",
+    "wait:18000", "nocaption", "key:tab", "wait:2500",
     "action:ida::NewPseudoTab", "wait:2500", "shot:tabs_new",
     "key:g", "wait:300", "type:SearchFiles", "key:enter", "wait:3000", "shot:tabs_two",
     "action:ida::CopyAddress", "wait:300", "clipassert:140002288",

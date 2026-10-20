@@ -101,8 +101,10 @@ fn main() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(900.), px(560.))),
                     focus: automation.is_none(),
+                    // The title strip draws its own caption and window buttons.
                     titlebar: Some(TitlebarOptions {
                         title: Some("ida-zui".into()),
+                        appears_transparent: true,
                         ..Default::default()
                     }),
                     ..Default::default()

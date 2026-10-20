@@ -25,6 +25,8 @@
 #   clipassert:<text>  like clipdump, then compare with <text> (write newlines as \n); a mismatch fails the script
 #   marker:<name>      wait until the app has executed everything queued so far
 #   shot:<name>        save the window as artifacts/ui/<name>.png
+#   frameshot:<name>   the same, but the whole window including any frame the OS draws around it
+#   nocaption          FAILS the script if the main window has an OS caption (title bar) above its own title strip
 #   win:<n>            aim the following key/type/action/mouse/shot steps at floating window n (1-based, in the
 #                      order they were opened); win:0 is the main window again
 #   close              post WM_CLOSE (no focus change), waitexit:<ms>, files:<glob>
@@ -96,6 +98,8 @@ public static class Win {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
@@ -261,6 +265,32 @@ try {
                 $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
                 $bmp.Dispose()
                 Note "shot $file"
+            }
+            "frameshot" {
+                [Win]::SendToBottom($h)
+                Start-Sleep -Milliseconds 250
+                $r = New-Object Win+RECT
+                [Win]::GetWindowRect($h, [ref]$r) | Out-Null
+                $bmp = New-Object System.Drawing.Bitmap ($r.R - $r.L), ($r.B - $r.T)
+                $g = [System.Drawing.Graphics]::FromImage($bmp)
+                $hdc = $g.GetHdc()
+                [Win]::PrintWindow($h, $hdc, 2) | Out-Null   # PW_RENDERFULLCONTENT, frame included
+                $g.ReleaseHdc($hdc)
+                $g.Dispose()
+                $file = Join-Path $out "$arg.png"
+                $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+                $bmp.Dispose()
+                Note "frameshot $file"
+            }
+            "nocaption" {
+                # Without an OS caption the client area starts at the window's top edge.
+                $r = New-Object Win+RECT
+                [Win]::GetWindowRect($h, [ref]$r) | Out-Null
+                $p = New-Object Win+POINT
+                [Win]::ClientToScreen($h, [ref]$p) | Out-Null
+                $caption = $p.Y - $r.T
+                if ($caption -gt 2) { Note "FAIL nocaption: the client area starts $caption px below the window top (an OS title bar)"; $failed = $true }
+                else { Note "PASS nocaption: client top is $caption px below the window top" }
             }
             "procs" {
                 $kids = @(Get-CimInstance Win32_Process -Filter "Name='ida-host.exe' AND ParentProcessId=$($proc.Id)" | ForEach-Object { $_.ProcessId })
