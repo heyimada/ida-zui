@@ -48,7 +48,7 @@ impl Default for PanelLayout {
             inspector: true,
             bottom: true,
             split: false,
-            sidebar_w: 380.,
+            sidebar_w: 420.,
             inspector_w: 300.,
             bottom_h: 152.,
             rail: "functions".to_owned(),

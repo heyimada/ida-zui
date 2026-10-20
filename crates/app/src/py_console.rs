@@ -857,7 +857,14 @@ impl Render for PyConsole {
                             .text_color(hsla(if self.running.is_some() { t.faint } else { t.accent }))
                             .child(if self.idc { "idc" } else { ">>>" }),
                     )
-                    .child(div().flex_1().min_w_0().h(px(lh * rows as f32 + 8.)).py(px(4.)).child(self.input.clone())),
+                    .child(div().id("py-input").flex_1().min_w_0().h(px(lh * rows as f32 + 8.)).py(px(4.)).on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(|v, ev: &gpui::MouseDownEvent, _, cx| {
+                            let focus = gpui::Focusable::focus_handle(v.input.read(cx), cx);
+                            let entries = crate::context_menu::editor_entries(focus, Vec::new());
+                            crate::context_menu::show(&v.session, ev.position, "Input", entries, false, cx);
+                        }),
+                    ).child(self.input.clone())),
             )
     }
 }

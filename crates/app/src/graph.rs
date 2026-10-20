@@ -7,7 +7,7 @@ use crate::graph_layout::{self, Layout};
 use crate::graph_paint::{self, MINIMAP_GAP};
 use crate::scrollbar::{self, Axes};
 use crate::selection::{Anchor, CopyLine, lines_text};
-use crate::session::{Caret, Origin, Session, SessionEvent};
+use crate::session::{Caret, Origin, Session, SessionEvent, ViewKind};
 use crate::theme::{Theme, hsla};
 use crate::ui;
 use gpui::{
@@ -109,6 +109,8 @@ fn fold_lines(lines: Vec<(Ea, Line)>) -> (Vec<(Ea, Line)>, Option<Vec<(Ea, Line)
 
 pub struct GraphView {
     session: Entity<Session>,
+    /// This view\'s identity in `SessionEvent::CursorMoved`.
+    origin: Origin,
     focus: FocusHandle,
     func: Option<Ea>,
     name: SharedString,
@@ -147,7 +149,7 @@ impl GraphView {
     pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
         let sub = cx.subscribe(&session, |this, _, ev, cx| match ev {
             SessionEvent::Navigated { ea, .. } => this.follow_address(*ea, true, cx),
-            SessionEvent::CursorMoved { ea, origin } if *origin != Origin::Graph => {
+            SessionEvent::CursorMoved { ea, origin } if *origin != this.origin => {
                 this.follow_address(*ea, false, cx)
             }
             SessionEvent::Changed => {
@@ -165,6 +167,7 @@ impl GraphView {
         });
         Self {
             session,
+            origin: Origin::new(ViewKind::Graph),
             focus: cx.focus_handle(),
             func: None,
             name: SharedString::default(),
@@ -448,7 +451,7 @@ impl GraphView {
     fn publish_caret(&mut self, cx: &mut Context<Self>) {
         let Some((b, l)) = self.cursor else { return };
         let caret = Caret {
-            origin: Some(Origin::Graph),
+            origin: Some(self.origin),
             line: Some(l as u32 + 1),
             col: self.caret_col as u32 + 1,
             block: Some(b),
@@ -504,7 +507,7 @@ impl GraphView {
                 self.highlight = self.token().map(Into::into);
                 if let Some(ea) = self.cursor_ea() {
                     self.session
-                        .update(cx, |s, cx| s.set_cursor(ea, Origin::Graph, cx));
+                        .update(cx, |s, cx| s.set_cursor(ea, self.origin, cx));
                 }
                 if self.blocks.get(b).is_some_and(|k| k.chip == Some(l)) {
                     self.expand_block(b);
@@ -533,7 +536,7 @@ impl GraphView {
                 self.caret_col = col;
                 if let Some(ea) = self.cursor_ea() {
                     self.session
-                        .update(cx, |s, cx| s.set_cursor(ea, Origin::Graph, cx));
+                        .update(cx, |s, cx| s.set_cursor(ea, self.origin, cx));
                 }
                 self.publish_caret(cx);
                 cx.notify();
@@ -626,7 +629,7 @@ impl GraphView {
         self.caret_col = 0;
         self.reveal((b, to), false);
         self.session
-            .update(cx, |s, cx| s.set_cursor(ea, Origin::Graph, cx));
+            .update(cx, |s, cx| s.set_cursor(ea, self.origin, cx));
         self.publish_caret(cx);
         cx.notify();
     }
@@ -673,7 +676,7 @@ impl GraphView {
             self.highlight = self.token().map(Into::into);
             if let Some(ea) = self.cursor_ea() {
                 self.session
-                    .update(cx, |s, cx| s.set_cursor(ea, Origin::Graph, cx));
+                    .update(cx, |s, cx| s.set_cursor(ea, self.origin, cx));
             }
             self.publish_caret(cx);
         }
@@ -735,7 +738,7 @@ impl GraphView {
         self.caret_col = 0;
         self.reveal((b, l), false);
         self.session
-            .update(cx, |s, cx| s.set_cursor(ea, Origin::Graph, cx));
+            .update(cx, |s, cx| s.set_cursor(ea, self.origin, cx));
         self.publish_caret(cx);
         cx.notify();
     }

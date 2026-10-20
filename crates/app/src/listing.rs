@@ -7,7 +7,7 @@ use crate::code::{self, HitMap, line_height};
 use crate::commands::{self, EditKind};
 use crate::scrollbar::{self, Axes, Axis, Metrics, Source};
 use crate::selection::{Anchor, CopyLine, lines_text};
-use crate::session::{Caret, Origin, Session, SessionEvent};
+use crate::session::{Caret, Origin, Session, SessionEvent, ViewKind};
 use crate::theme::{Theme, hsla};
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -45,6 +45,8 @@ impl Row {
 
 pub struct ListingView {
     session: Entity<Session>,
+    /// This view\'s identity in `SessionEvent::CursorMoved`.
+    origin: Origin,
     focus: FocusHandle,
     rows: Vec<Row>,
     top: f32,
@@ -88,7 +90,7 @@ impl ListingView {
     pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
         let sub = cx.subscribe(&session, |this, _, ev, cx| match ev {
             SessionEvent::Navigated { ea, .. } => this.show(*ea, true, cx),
-            SessionEvent::CursorMoved { ea, origin } if *origin != Origin::Listing => {
+            SessionEvent::CursorMoved { ea, origin } if *origin != this.origin => {
                 this.show(*ea, false, cx)
             }
             SessionEvent::Opened => this.load_segments(cx),
@@ -103,6 +105,7 @@ impl ListingView {
         });
         Self {
             session,
+            origin: Origin::new(ViewKind::Listing),
             focus: cx.focus_handle(),
             rows: Vec::new(),
             top: 0.,
@@ -541,7 +544,7 @@ impl ListingView {
 
     fn publish_caret(&mut self, cx: &mut Context<Self>) {
         let caret = Caret {
-            origin: Some(Origin::Listing),
+            origin: Some(self.origin),
             line: None,
             col: self.caret_col as u32 + 1,
             block: None,
@@ -557,7 +560,7 @@ impl ListingView {
     fn publish_cursor(&mut self, cx: &mut Context<Self>) {
         if let Some(ea) = self.cursor_ea() {
             self.session
-                .update(cx, |s, cx| s.set_cursor(ea, Origin::Listing, cx));
+                .update(cx, |s, cx| s.set_cursor(ea, self.origin, cx));
             self.publish_caret(cx);
         }
     }

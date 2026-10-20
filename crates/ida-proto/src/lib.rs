@@ -422,7 +422,11 @@ pub enum StringKind {
 pub struct FuncEditInfoReply {
     pub start: Ea,
     pub end: Ea,
+    /// The demangled (short) name, for display.
     pub name: String,
+    /// The name as stored in the database; what a rename compares against.
+    #[serde(default)]
+    pub raw_name: String,
     pub noret: bool,
     pub far: bool,
     pub library: bool,

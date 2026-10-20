@@ -2275,10 +2275,11 @@ impl Workspace {
                 self.hex.clone().into_any_element(),
             ),
             Mode::Pseudo => {
-                let line = s
-                    .caret
-                    .line
-                    .filter(|_| s.caret.origin == Some(crate::session::Origin::Pseudocode));
+                let line = s.caret.line.filter(|_| {
+                    s.caret
+                        .origin
+                        .is_some_and(|o| o.kind == crate::session::ViewKind::Pseudocode)
+                });
                 let note = match line {
                     Some(l) => format!("Hex-Rays  ·  line {l}"),
                     None => "Hex-Rays".to_owned(),

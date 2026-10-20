@@ -14,11 +14,11 @@ $copyName = @("rightclick:100,204", "wait:600", "key:down", "key:down", "key:dow
 $steps = @(
     "wait:18000", "shot:tab_functions",
     # Length ascending: by value, so 2 comes before 3, 6 and 0x10 (as text, "10" would lead)
-    "click:330,180", "wait:700", "shot:tab_length_asc") + $copyName + @("clipassert:_guard_dispatch_icall_nop",
+    "click:392,180", "wait:700", "shot:tab_length_asc") + $copyName + @("clipassert:_guard_dispatch_icall_nop",
     # Start descending: the highest address first
-    "click:250,180", "wait:500", "click:250,180", "wait:700", "shot:tab_start_desc") + $copyName + @("clipassert:_guard_dispatch_icall`$thunk`$10345483385596137414",
+    "click:290,180", "wait:500", "click:290,180", "wait:700", "shot:tab_start_desc") + $copyName + @("clipassert:_guard_dispatch_icall`$thunk`$10345483385596137414",
     # a column edge drags: Name wider, and the Start column moves right
-    "drag:172,180,215,180", "wait:600", "shot:tab_resized",
+    "drag:232,180,275,180", "wait:600", "shot:tab_resized",
     # Names: sorted by name ignoring case, `__C_specific_handler_0` before `__castguard...`
     "action:ida::ShowNames", "wait:1200", "click:150,180", "wait:700", "shot:tab_names_by_name") + $copyName + @("clipassert:__C_specific_handler_0",
     # the other lists

@@ -6,7 +6,7 @@ use crate::code::{self, HitMap, line_height};
 use crate::commands;
 use crate::scrollbar::{self, Axes, Axis, Metrics, Source};
 use crate::selection::{Anchor, CopyLine, lines_text};
-use crate::session::{Caret, Origin, Session, SessionEvent};
+use crate::session::{Caret, Origin, Session, SessionEvent, ViewKind};
 use crate::theme::{Theme, hsla};
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -17,6 +17,8 @@ use ida_proto::{DecompileOpts, Ea, ItemInfo, PseudoItemOpts, RenameLvar, SetLvar
 
 pub struct PseudoView {
     session: Entity<Session>,
+    /// This view\'s identity in `SessionEvent::CursorMoved`.
+    origin: Origin,
     focus: FocusHandle,
     func: Option<Ea>,
     name: SharedString,
@@ -56,7 +58,7 @@ impl PseudoView {
     pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
         let sub = cx.subscribe(&session, |this, _, ev, cx| match ev {
             SessionEvent::Navigated { ea, .. } => this.follow_address(*ea, cx),
-            SessionEvent::CursorMoved { ea, origin } if *origin != Origin::Pseudocode => {
+            SessionEvent::CursorMoved { ea, origin } if *origin != this.origin => {
                 this.follow_address(*ea, cx)
             }
             SessionEvent::Changed => {
@@ -75,6 +77,7 @@ impl PseudoView {
         });
         Self {
             session,
+            origin: Origin::new(ViewKind::Pseudocode),
             focus: cx.focus_handle(),
             func: None,
             name: SharedString::default(),
@@ -226,7 +229,7 @@ impl PseudoView {
         let line = self.lines.get(self.cursor);
         let token = line.and_then(|l| l.word_at(self.caret_col).map(|r| l.text[r].to_owned()));
         let caret = Caret {
-            origin: Some(Origin::Pseudocode),
+            origin: Some(self.origin),
             line: Some(self.cursor as u32 + 1),
             col: self.caret_col as u32 + 1,
             block: None,
@@ -240,8 +243,8 @@ impl PseudoView {
         self.publish_caret(cx);
         self.with_item(cx, |v, _, info, cx| {
             if let Some(ea) = info.ea {
-                v.session
-                    .update(cx, |s, cx| s.set_cursor(ea, Origin::Pseudocode, cx));
+                let origin = v.origin;
+                v.session.update(cx, |s, cx| s.set_cursor(ea, origin, cx));
             }
         });
     }

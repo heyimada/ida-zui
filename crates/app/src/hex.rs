@@ -4,7 +4,7 @@ use crate::actions::*;
 use crate::code::{self, line_height};
 use crate::scrollbar::{self, Axes, Axis, Metrics, Source};
 use crate::selection::{Anchor, BytesFormat, bytes_text};
-use crate::session::{Origin, Session, SessionEvent};
+use crate::session::{Origin, Session, SessionEvent, ViewKind};
 use crate::settings;
 use crate::theme::{Theme, hsla};
 use gpui::{
@@ -136,6 +136,8 @@ impl HexEdit {
 
 pub struct HexView {
     session: Entity<Session>,
+    /// This view\'s identity in `SessionEvent::CursorMoved`.
+    origin: Origin,
     focus: FocusHandle,
     segs: Vec<SegRow>,
     /// Cumulative row index where each segment starts.
@@ -183,7 +185,7 @@ impl HexView {
                 this.load_patches(cx);
             }
             SessionEvent::Navigated { ea, .. } => this.show(*ea, true, cx),
-            SessionEvent::CursorMoved { ea, origin } if *origin != Origin::Hex => {
+            SessionEvent::CursorMoved { ea, origin } if *origin != this.origin => {
                 this.show(*ea, false, cx)
             }
             SessionEvent::Changed => {
@@ -214,6 +216,7 @@ impl HexView {
         });
         Self {
             session,
+            origin: Origin::new(ViewKind::Hex),
             focus: cx.focus_handle(),
             segs: Vec::new(),
             seg_rows: Vec::new(),
@@ -494,7 +497,7 @@ impl HexView {
         self.cursor = if end { base + ROW - 1 } else { base };
         let ea = self.cursor;
         self.session
-            .update(cx, |s, cx| s.set_cursor(ea, Origin::Hex, cx));
+            .update(cx, |s, cx| s.set_cursor(ea, self.origin, cx));
         cx.notify();
     }
 
@@ -509,7 +512,7 @@ impl HexView {
             self.show(self.cursor, false, cx);
             let ea = self.cursor;
             self.session
-                .update(cx, |s, cx| s.set_cursor(ea, Origin::Hex, cx));
+                .update(cx, |s, cx| s.set_cursor(ea, self.origin, cx));
         }
     }
 
@@ -550,7 +553,7 @@ impl HexView {
                 self.session.update(cx, |s, cx| s.navigate(ea, cx));
             } else {
                 self.session
-                    .update(cx, |s, cx| s.set_cursor(ea, Origin::Hex, cx));
+                    .update(cx, |s, cx| s.set_cursor(ea, self.origin, cx));
             }
             cx.notify();
         }
@@ -579,7 +582,7 @@ impl HexView {
                 self.sel.clear();
                 self.cursor = byte;
                 self.session
-                    .update(cx, |s, cx| s.set_cursor(byte, Origin::Hex, cx));
+                    .update(cx, |s, cx| s.set_cursor(byte, self.origin, cx));
             }
         }
         self.open_context_menu(ev.position, false, cx);
@@ -616,7 +619,7 @@ impl HexView {
             self.sel.begin(from as usize);
             self.cursor = byte;
             self.session
-                .update(cx, |s, cx| s.set_cursor(byte, Origin::Hex, cx));
+                .update(cx, |s, cx| s.set_cursor(byte, self.origin, cx));
             cx.notify();
         }
     }

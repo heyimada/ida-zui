@@ -11,7 +11,7 @@ $root = Split-Path $PSScriptRoot -Parent
 $steps = @(
     "wait:18000", "key:tab", "wait:2500", "shot:cast_on",
     "key:\", "wait:2500", "shot:cast_off",
-    "click:520,634", "wait:500", "key:n", "wait:700", "shot:cast_prompt",
+    "click:560,634", "wait:500", "key:n", "wait:700", "shot:cast_prompt",
     "key:ctrl-a", "type:TerminateRenamed", "key:enter", "wait:3500", "shot:cast_renamed",
     "key:ctrl-c", "wait:300", "clipassert:  TerminateRenamed(v6);",
     # casts come back with the same key

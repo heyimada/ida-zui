@@ -14,7 +14,7 @@ $steps = @(
     "wait:18000",
     "files:find.exe",
     # --- operands on `mov edx, 7530h` (found by its immediate; the caret goes on 7530h)
-    "key:alt-i", "wait:500", "type:0x7530", "key:enter", "wait:1500", "click:816,368", "wait:800",
+    "key:alt-i", "wait:500", "type:0x7530", "key:enter", "wait:1500", "click:856,368", "wait:800",
     "key:h", "wait:1500", "key:h", "wait:1500") +
     (Line "        mov     edx, 30000") + @("key:b", "wait:1500") +
     (Line "        mov     edx, 111010100110000b") + @("key:r", "wait:1500") +

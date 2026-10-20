@@ -325,7 +325,7 @@ impl FuncDialog {
                     Ok(i) => {
                         d.end
                             .update(cx, |x, cx| x.set_value(&format!("{:X}", i.end), cx));
-                        d.name.update(cx, |x, cx| x.set_value(&i.name, cx));
+                        d.name.update(cx, |x, cx| x.set_value(&i.raw_name, cx));
                         d.locals
                             .update(cx, |x, cx| x.set_value(&i.locals.to_string(), cx));
                         d.saved
@@ -417,7 +417,7 @@ impl FuncDialog {
             ea: info.start,
             edit,
         });
-        let rename = (name != info.name && !name.is_empty()).then(|| {
+        let rename = (name != info.raw_name && !name.is_empty()).then(|| {
             s.call(Rename {
                 ea: info.start,
                 name,
@@ -491,6 +491,18 @@ impl Render for FuncDialog {
                     ))
                     .child(row(&t, "End", self.end.clone()))
                     .child(row(&t, "Name", self.name.clone()))
+                    .when(
+                        self.info.as_ref().is_some_and(|i| i.name != i.raw_name),
+                        |d| {
+                            d.child(caption(
+                                &t,
+                                format!(
+                                    "Shown as {}",
+                                    self.info.as_ref().map(|i| i.name.as_str()).unwrap_or_default()
+                                ),
+                            ))
+                        },
+                    )
                     .child(
                         div()
                             .flex()

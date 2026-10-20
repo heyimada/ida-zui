@@ -102,11 +102,11 @@ const fn col(title: &'static str, width: f32, grow: bool, numeric: bool) -> ColS
 }
 
 const FUNCTION_COLS: [ColSpec; 5] = [
-    col("Name", 130., true, false),
-    col("Segment", 60., false, false),
+    col("Name", 150., true, false),
+    col("Segment", 56., false, false),
     col("Start", 78., false, true),
-    col("Length", 52., false, true),
-    col("Flags", 56., false, false),
+    col("Length", 46., false, true),
+    col("Flags", 52., false, false),
 ];
 const NAME_COLS: [ColSpec; 3] = [
     col("Address", 78., false, true),
@@ -589,14 +589,16 @@ impl Sidebar {
                                     r.short.clone()
                                 };
                                 let mangled = (shown != r.name).then(|| r.name.clone());
+                                // IDA gives an entry without an ordinal its own address.
+                                let ordinal = if r.ordinal == r.ea {
+                                    "—".to_owned()
+                                } else {
+                                    r.ordinal.to_string()
+                                };
                                 Item::table(
                                     shown.clone(),
                                     r.ea,
-                                    vec![
-                                        shown.clone(),
-                                        format!("{:X}", r.ea),
-                                        r.ordinal.to_string(),
-                                    ],
+                                    vec![shown.clone(), format!("{:X}", r.ea), ordinal],
                                     vec![
                                         SortKey::text(&shown),
                                         SortKey::Num(r.ea),
@@ -843,7 +845,16 @@ impl Render for Sidebar {
                                             .map(|f| ui::badge(*f, ui::BadgeKind::Neutral, &theme)),
                                     )
                                 })
-                                .when(spec.title != "Flags", |d| d.child(text))
+                                .when(spec.title != "Flags", |d| {
+                                    d.child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .child(text),
+                                    )
+                                })
                         })),
                         None => row
                             .child(

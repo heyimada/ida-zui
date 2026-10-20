@@ -19,11 +19,47 @@ pub(crate) mod debug;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Origin {
+pub enum ViewKind {
     Listing,
     Graph,
     Pseudocode,
     Hex,
+}
+
+/// Which view an event came from: its kind and its own id, so two views of
+/// one kind (two listings) follow each other without echoing themselves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Origin {
+    pub kind: ViewKind,
+    pub view: u64,
+}
+
+impl Origin {
+    /// A new view's identity; every call gives a distinct one.
+    pub fn new(kind: ViewKind) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            kind,
+            view: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+
+    #[test]
+    fn two_views_of_one_kind_are_different_origins() {
+        let (a, b) = (
+            Origin::new(ViewKind::Listing),
+            Origin::new(ViewKind::Listing),
+        );
+        assert_ne!(a, b);
+        assert_eq!(a.kind, b.kind);
+        let a2 = a;
+        assert_eq!(a, a2, "a view recognises its own events");
+    }
 }
 
 /// Where the caret sits inside the focused code view, for the status bar,
