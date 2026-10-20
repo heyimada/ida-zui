@@ -40,6 +40,10 @@ std::vector<std::string> ev_capture_end();
 void ev_python_begin();
 bool ev_python_changed();
 
+// Reports a change that has no IDB notification (bookmarks) as a `display`
+// change at `ea`.
+void ev_note_display(ea_t ea);
+
 // The address `idc.here()` reports.
 void ev_set_screen_ea(ea_t ea);
 

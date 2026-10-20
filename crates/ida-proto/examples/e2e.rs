@@ -97,6 +97,16 @@ fn raw_blob_as_arm(binary: &std::path::Path, out: &mut String, check: &mut impl 
         joined.contains("ADD") && joined.contains("X1"),
         "the second instruction disassembles as ARM64 add x1",
     );
+    let asm = c.call_blocking(Assemble {
+        ea: base,
+        text: "nop".into(),
+        pad: false,
+    });
+    writeln!(out, "assemble on arm: {asm:?}").unwrap();
+    check(
+        matches!(&asm, Err(ClientError::Ida(m)) if m.contains("no assembler")),
+        "assemble names the missing assembler on a processor without one",
+    );
     let _ = c.call_blocking(Close { save: false });
 }
 
@@ -1554,6 +1564,1062 @@ fn text_of(r: &PyReply, stream: &str) -> String {
         .collect()
 }
 
+// ---- Edit menu: operand representation, arrays, strings, function
+// properties, patching and marks -------------------------------------------
+
+/// The text of the first listing line of the item at `ea` (no comments,
+/// no labels on a line of their own).
+fn item_text(c: &Client, ea: Ea) -> String {
+    let l = c.call_blocking(ListingDown { ea, count: 1 }).unwrap();
+    l.lines
+        .iter()
+        .filter(|l| l.ea == ea)
+        .map(|l| tags::strip(&l.tagged))
+        .find(|t| {
+            let code = t.split(';').next().unwrap_or("").trim();
+            !code.is_empty() && !code.ends_with(':') && !code.contains(" proc ")
+        })
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
+}
+
+/// Every listing line of the item at `ea`, comments and all.
+fn item_block(c: &Client, ea: Ea) -> String {
+    let l = c.call_blocking(ListingDown { ea, count: 1 }).unwrap();
+    l.lines
+        .iter()
+        .map(|l| tags::strip(&l.tagged))
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        )
+}
+
+/// Mnemonic and comma-separated operands of an instruction line.
+fn split_insn(text: &str) -> (String, Vec<String>) {
+    let code = text.split(';').next().unwrap_or("").trim();
+    let (m, rest) = code.split_once(char::is_whitespace).unwrap_or((code, ""));
+    let ops = if rest.trim().is_empty() {
+        Vec::new()
+    } else {
+        rest.split(',').map(|o| o.trim().to_owned()).collect()
+    };
+    (m.to_owned(), ops)
+}
+
+fn operand_text(c: &Client, ea: Ea, op: usize) -> String {
+    split_insn(&item_text(c, ea))
+        .1
+        .get(op)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn repr_row(c: &Client, ea: Ea, op: u32) -> Option<OpReprRow> {
+    c.call_blocking(GetOpRepr { ea })
+        .unwrap()
+        .into_iter()
+        .find(|r| r.op == op)
+}
+
+fn repr_kind(c: &Client, ea: Ea, op: u32) -> Option<OpReprKind> {
+    repr_row(c, ea, op).map(|r| r.kind)
+}
+
+fn set_repr(c: &Client, ea: Ea, op: Option<u32>, repr: OpRepr) -> Result<(), ClientError> {
+    c.call_blocking(SetOpRepr { ea, op, repr })
+}
+
+/// `mov eax, 5A4Dh`: an instruction whose second operand is a plain hex number.
+fn find_immediate(c: &Client, funcs: &[FuncRow]) -> Option<(Ea, u64)> {
+    for f in funcs.iter().filter(|f| !f.library && !f.thunk).take(40) {
+        let l = c
+            .call_blocking(ListingDown {
+                ea: f.start,
+                count: 300,
+            })
+            .unwrap();
+        for line in &l.lines {
+            let (m, ops) = split_insn(&tags::strip(&line.tagged));
+            if m != "mov" || ops.len() != 2 {
+                continue;
+            }
+            let t = &ops[1];
+            let Some(digits) = t.strip_suffix('h') else {
+                continue;
+            };
+            let Ok(v) = u64::from_str_radix(digits, 16) else {
+                continue;
+            };
+            if (0x20..=0xFFFF).contains(&v) && t.starts_with(|ch: char| ch.is_ascii_digit()) {
+                return Some((line.ea, v));
+            }
+        }
+    }
+    None
+}
+
+/// An instruction with a stack variable operand (`[rsp+28h+var_10]`).
+fn find_stack_operand(c: &Client, funcs: &[FuncRow]) -> Option<(Ea, u32)> {
+    for f in funcs.iter().filter(|f| !f.library && !f.thunk).take(40) {
+        let l = c
+            .call_blocking(ListingDown {
+                ea: f.start,
+                count: 300,
+            })
+            .unwrap();
+        for line in &l.lines {
+            let t = tags::strip(&line.tagged);
+            if !(t.contains("var_") || t.contains("arg_")) || !t.contains('[') {
+                continue;
+            }
+            if let Some(r) = c
+                .call_blocking(GetOpRepr { ea: line.ea })
+                .unwrap()
+                .into_iter()
+                .find(|r| r.kind == OpReprKind::StackVar)
+            {
+                return Some((line.ea, r.op));
+            }
+        }
+    }
+    None
+}
+
+fn operand_representation(
+    c: &Client,
+    funcs: &[FuncRow],
+    events: &mut Events,
+    out: &mut String,
+    check: &mut impl FnMut(bool, &str),
+) {
+    writeln!(out, "\n== operand representation").unwrap();
+    let Some((ea, v)) = find_immediate(c, funcs) else {
+        check(false, "an instruction with a hex immediate exists");
+        return;
+    };
+    let before = item_text(c, ea);
+    writeln!(out, "{ea:#x}: {before}   (immediate {v:#x})").unwrap();
+    let show = |what: &str, out: &mut String| {
+        let t = operand_text(c, ea, 1);
+        writeln!(out, "  {what:<16} -> {t}").unwrap();
+        t
+    };
+    drain(events);
+
+    set_repr(c, ea, Some(1), OpRepr::Decimal).unwrap();
+    let dec = show("decimal", out);
+    check(
+        dec == v.to_string(),
+        "set_op_repr decimal shows the number in decimal",
+    );
+    check(
+        repr_kind(c, ea, 1) == Some(OpReprKind::Decimal),
+        "get_op_repr reports decimal after set decimal",
+    );
+    let ev = drain(events);
+    check(
+        changes(&ev)
+            .iter()
+            .any(|d| d.kinds.iter().any(|k| k == "type") && d.lo.is_some_and(|lo| lo <= ea)),
+        "an operand change emits a db_changed event of kind type at the address",
+    );
+    set_repr(c, ea, Some(1), OpRepr::Hex).unwrap();
+    let hex = show("hex", out);
+    check(
+        hex.ends_with('h') && u64::from_str_radix(hex.trim_end_matches('h'), 16) == Ok(v),
+        "set_op_repr hex shows a hex number",
+    );
+    check(
+        repr_kind(c, ea, 1) == Some(OpReprKind::Hex),
+        "get_op_repr reports hex after set hex",
+    );
+    set_repr(c, ea, Some(1), OpRepr::Binary).unwrap();
+    let bin = show("binary", out);
+    check(
+        bin.ends_with('b')
+            && u64::from_str_radix(&bin.trim_end_matches('b').replace(' ', ""), 2) == Ok(v),
+        "set_op_repr binary shows the number in binary",
+    );
+    set_repr(c, ea, Some(1), OpRepr::Octal).unwrap();
+    let oct = show("octal", out);
+    check(
+        oct.ends_with('o') && u64::from_str_radix(oct.trim_end_matches('o'), 8) == Ok(v),
+        "set_op_repr octal shows the number in octal",
+    );
+    set_repr(c, ea, Some(1), OpRepr::Char).unwrap();
+    show("char", out);
+    check(
+        repr_kind(c, ea, 1) == Some(OpReprKind::Char),
+        "get_op_repr reports char after set char",
+    );
+    set_repr(c, ea, Some(1), OpRepr::Number).unwrap();
+    check(
+        repr_kind(c, ea, 1) == Some(OpReprKind::Hex),
+        "set_op_repr number uses the processor's default radix",
+    );
+
+    // Negation and inversion are set, not toggled: applying twice is a no-op.
+    set_repr(c, ea, Some(1), OpRepr::Decimal).unwrap();
+    for (name, on, off) in [
+        (
+            "negate",
+            OpRepr::Negate { on: true },
+            OpRepr::Negate { on: false },
+        ),
+        (
+            "invert",
+            OpRepr::Invert { on: true },
+            OpRepr::Invert { on: false },
+        ),
+    ] {
+        set_repr(c, ea, Some(1), on.clone()).unwrap();
+        set_repr(c, ea, Some(1), on).unwrap();
+        let t = show(name, out);
+        let row = repr_row(c, ea, 1).unwrap();
+        let flag = if name == "negate" {
+            row.negated
+        } else {
+            row.inverted
+        };
+        check(
+            t != dec && flag,
+            &format!("set_op_repr {name} changes the operand text and get_op_repr reports it"),
+        );
+        set_repr(c, ea, Some(1), off).unwrap();
+        check(
+            operand_text(c, ea, 1) == dec,
+            &format!("set_op_repr {name} off restores the text"),
+        );
+    }
+
+    set_repr(c, ea, Some(1), OpRepr::Offset { base: None }).unwrap();
+    show("offset (base 0)", out);
+    check(
+        repr_kind(c, ea, 1) == Some(OpReprKind::Offset),
+        "set_op_repr offset makes get_op_repr report an offset",
+    );
+    // A base that makes the target a function start, which certainly exists.
+    let base = funcs[0].start - v;
+    set_repr(c, ea, Some(1), OpRepr::Offset { base: Some(base) }).unwrap();
+    show("offset (based)", out);
+    let row = repr_row(c, ea, 1).unwrap();
+    check(
+        row.kind == OpReprKind::Offset && row.detail == format!("{base:X}"),
+        "set_op_repr offset from a base makes get_op_repr report the offset and its base",
+    );
+    set_repr(c, ea, Some(1), OpRepr::OffsetSegment).unwrap();
+    show("offset (segment)", out);
+    check(
+        repr_kind(c, ea, 1) == Some(OpReprKind::Offset),
+        "set_op_repr offset-from-segment sets an offset",
+    );
+
+    // Enum and struct offset by name: types whose member sits at the immediate.
+    let applied = c
+        .call_blocking(TypeApply {
+            decl: format!(
+                "enum E2eOpsEnum {{ E2E_OPS_MEMBER = {v:#x} }};\nstruct E2eOpsStruct {{ char pad[{v}]; char marker; }};"
+            ),
+        })
+        .unwrap();
+    check(
+        applied.applied,
+        "the operand-representation types are declared",
+    );
+    set_repr(
+        c,
+        ea,
+        Some(1),
+        OpRepr::Enum {
+            name: "E2eOpsEnum".into(),
+        },
+    )
+    .unwrap();
+    let en = show("enum", out);
+    check(
+        en == "E2E_OPS_MEMBER" && repr_kind(c, ea, 1) == Some(OpReprKind::Enum),
+        "set_op_repr enum shows the enum member's name",
+    );
+    check(
+        repr_row(c, ea, 1).unwrap().detail == "E2eOpsEnum",
+        "get_op_repr names the enum",
+    );
+    set_repr(
+        c,
+        ea,
+        Some(1),
+        OpRepr::StructOffset {
+            path: vec!["E2eOpsStruct".into()],
+            delta: 0,
+        },
+    )
+    .unwrap();
+    let so = show("struct offset", out);
+    check(
+        so.contains("marker") && repr_kind(c, ea, 1) == Some(OpReprKind::StructOffset),
+        "set_op_repr struct offset shows the member at that offset",
+    );
+    check(
+        repr_row(c, ea, 1).unwrap().detail == "E2eOpsStruct",
+        "get_op_repr names the struct path",
+    );
+    check(
+        set_repr(
+            c,
+            ea,
+            Some(1),
+            OpRepr::Enum {
+                name: "NoSuchEnum".into(),
+            },
+        )
+        .is_err()
+            && set_repr(
+                c,
+                ea,
+                Some(1),
+                OpRepr::StructOffset {
+                    path: vec!["NoSuchStruct".into()],
+                    delta: 0,
+                },
+            )
+            .is_err()
+            && set_repr(c, ea, Some(9), OpRepr::Hex).is_err(),
+        "set_op_repr rejects unknown types and operand numbers",
+    );
+
+    // All operands at once, then back to the default.
+    set_repr(c, ea, None, OpRepr::Hex).unwrap();
+    check(
+        repr_kind(c, ea, 1) == Some(OpReprKind::Hex),
+        "set_op_repr on all operands reaches operand 1",
+    );
+    set_repr(c, ea, None, OpRepr::Clear).unwrap();
+    check(
+        item_text(c, ea) == before && repr_kind(c, ea, 1) == Some(OpReprKind::Default),
+        "set_op_repr clear restores the default text",
+    );
+    for t in ["E2eOpsEnum", "E2eOpsStruct"] {
+        let _ = c.call_blocking(TypeDelete {
+            name: t.into(),
+            force: true,
+        });
+    }
+
+    // Undo reverts an operand change.
+    set_repr(c, ea, Some(1), OpRepr::Decimal).unwrap();
+    check(
+        operand_text(c, ea, 1) == v.to_string(),
+        "decimal is shown before the undo",
+    );
+    let undone = c.call_blocking(Undo {}).unwrap();
+    let after = item_text(c, ea);
+    writeln!(out, "  undo -> {after}").unwrap();
+    check(undone && after == before, "undo reverts an operand change");
+
+    // Stack variable (K): off by hex, back on by stack_var.
+    if let Some((sea, sop)) = find_stack_operand(c, funcs) {
+        let s0 = item_text(c, sea);
+        set_repr(c, sea, Some(sop), OpRepr::Hex).unwrap();
+        let s1 = item_text(c, sea);
+        let off = repr_kind(c, sea, sop) != Some(OpReprKind::StackVar) && s1 != s0;
+        set_repr(c, sea, Some(sop), OpRepr::StackVar).unwrap();
+        let s2 = item_text(c, sea);
+        writeln!(
+            out,
+            "stack operand {sea:#x}: {s0} | hex: {s1} | stack_var: {s2}"
+        )
+        .unwrap();
+        check(
+            off && s2 == s0 && repr_kind(c, sea, sop) == Some(OpReprKind::StackVar),
+            "set_op_repr stack_var turns a numeric operand back into the stack variable",
+        );
+    } else {
+        check(false, "an instruction with a stack variable exists");
+    }
+}
+
+fn arrays_and_strings(
+    c: &Client,
+    strings: &[StrRow],
+    target: Ea,
+    out: &mut String,
+    check: &mut impl FnMut(bool, &str),
+) {
+    writeln!(out, "\n== arrays and string types").unwrap();
+    let Some(s) = strings
+        .iter()
+        .find(|s| s.kind == "C" && s.len >= 16 && s.text.is_ascii())
+    else {
+        check(false, "a long C string exists to turn into an array");
+        return;
+    };
+    let ea = s.ea;
+    let original = item_block(c, ea);
+    let original_bytes = c.call_blocking(Bytes { ea, len: 16 }).unwrap().hex;
+    let next_of = |c: &Client| c.call_blocking(ListingDown { ea, count: 1 }).unwrap().next;
+    let original_next = next_of(c);
+    writeln!(out, "{ea:#x}: {original}").unwrap();
+
+    let _ = c.call_blocking(Undefine { ea }); // fails when nothing is defined there
+    let d = c.call_blocking(ArrayDefaults { ea }).unwrap();
+    writeln!(out, "defaults on unexplored bytes: {d:?}").unwrap();
+    check(
+        d.elem == ArrayElem::Byte && !d.is_array && d.max_count >= 16 && d.count >= 1,
+        "array_defaults offers bytes and the room that is left over unexplored data",
+    );
+    c.call_blocking(MakeArray {
+        ea,
+        elem: ArrayElem::Dword,
+        count: 3,
+    })
+    .unwrap();
+    let line = item_text(c, ea);
+    writeln!(out, "dword[3]: {line}  next={:?}", next_of(c)).unwrap();
+    check(
+        next_of(c) == Some(ea + 12),
+        "make_array dword x3 makes a 12-byte item",
+    );
+    check(
+        line.contains("dd "),
+        "make_array dword shows as dd in the listing",
+    );
+    let d = c.call_blocking(ArrayDefaults { ea }).unwrap();
+    check(
+        d.is_array && d.elem == ArrayElem::Dword && d.count == 3 && d.elem_size == 4,
+        "array_defaults describes the array that is there",
+    );
+    c.call_blocking(MakeArray {
+        ea,
+        elem: ArrayElem::Byte,
+        count: 5,
+    })
+    .unwrap();
+    check(
+        next_of(c) == Some(ea + 5),
+        "make_array again replaces the array",
+    );
+    check(
+        c.call_blocking(MakeArray {
+            ea,
+            elem: ArrayElem::Byte,
+            count: 0,
+        })
+        .is_err()
+            && c.call_blocking(MakeArray {
+                ea,
+                elem: ArrayElem::Struct {
+                    name: "NoSuchStruct".into(),
+                },
+                count: 2,
+            })
+            .is_err(),
+        "make_array rejects an empty array and an unknown struct",
+    );
+
+    // A pointer shown as an offset: `dq offset name`.
+    let _ = c.call_blocking(Undefine { ea });
+    c.call_blocking(PatchBytes {
+        ea,
+        hex: target
+            .to_le_bytes()
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(" "),
+    })
+    .unwrap();
+    let _ = c.call_blocking(Undefine { ea });
+    c.call_blocking(MakeArray {
+        ea,
+        elem: ArrayElem::Qword,
+        count: 1,
+    })
+    .unwrap();
+    set_repr(c, ea, Some(0), OpRepr::Hex).unwrap();
+    let plain = item_text(c, ea);
+    set_repr(c, ea, Some(0), OpRepr::Offset { base: None }).unwrap();
+    let as_offset = item_text(c, ea);
+    writeln!(out, "qword: {plain} | offset: {as_offset}").unwrap();
+    check(
+        !plain.contains("offset")
+            && as_offset.contains("offset")
+            && repr_kind(c, ea, 0) == Some(OpReprKind::Offset),
+        "set_op_repr offset shows a pointer as `offset name`",
+    );
+    set_repr(c, ea, Some(0), OpRepr::Clear).unwrap();
+    check(
+        repr_kind(c, ea, 0) == Some(OpReprKind::Default),
+        "set_op_repr clear takes the offset away again",
+    );
+
+    // String types: write each layout with patch_bytes, then define it.
+    let cases: [(StringKind, &str, u64, &str); 6] = [
+        (StringKind::C, "48 69 00", 3, "C"),
+        (StringKind::C16, "48 00 69 00 00 00", 6, "C16"),
+        (
+            StringKind::C32,
+            "48 00 00 00 69 00 00 00 00 00 00 00",
+            12,
+            "C32",
+        ),
+        (StringKind::Pascal, "02 48 69", 3, "Pascal"),
+        (StringKind::Len2, "02 00 48 69", 4, "Len2"),
+        (StringKind::Len4x16, "02 00 00 00 48 00 69 00", 8, "Len4x16"),
+    ];
+    for (kind, hex, size, name) in cases {
+        let _ = c.call_blocking(Undefine { ea }); // fails when nothing is defined there
+        c.call_blocking(PatchBytes {
+            ea,
+            hex: hex.into(),
+        })
+        .unwrap();
+        let _ = c.call_blocking(Undefine { ea }); // fails when nothing is defined there
+        c.call_blocking(MakeStringTyped { ea, kind, len: 0 })
+            .unwrap();
+        let t = item_text(c, ea);
+        let kind_now = c.call_blocking(AddrInfo { ea }).unwrap().kind;
+        writeln!(out, "{name}: {t}  next={:?} kind={kind_now}", next_of(c)).unwrap();
+        check(
+            kind_now == "string" && next_of(c) == Some(ea + size),
+            &format!("make_string_typed {name} makes a {size}-byte string"),
+        );
+        check(
+            item_block(c, ea).contains("'Hi'"),
+            &format!("make_string_typed {name} shows the text in the listing"),
+        );
+    }
+    // The old call keeps making a C string.
+    let _ = c.call_blocking(Undefine { ea }); // fails when nothing is defined there
+    c.call_blocking(PatchBytes {
+        ea,
+        hex: "48 69 00".into(),
+    })
+    .unwrap();
+    let _ = c.call_blocking(Undefine { ea }); // fails when nothing is defined there
+    c.call_blocking(MakeString { ea }).unwrap();
+    check(
+        next_of(c) == Some(ea + 3),
+        "make_string still makes a C string",
+    );
+    check(
+        c.call_blocking(MakeStringTyped {
+            ea: 0,
+            kind: StringKind::C,
+            len: 0,
+        })
+        .is_err(),
+        "make_string_typed fails where nothing can be defined",
+    );
+
+    // Put everything back.
+    let reverted = c.call_blocking(RevertPatches { ea, len: 16 }).unwrap();
+    let _ = c.call_blocking(Undefine { ea }); // fails when nothing is defined there
+    c.call_blocking(MakeString { ea }).unwrap();
+    let restored = item_block(c, ea);
+    let restored_bytes = c.call_blocking(Bytes { ea, len: 16 }).unwrap().hex;
+    writeln!(out, "restored ({reverted} bytes reverted): {restored}").unwrap();
+    check(
+        restored_bytes == original_bytes
+            && restored.contains(&format!("'{}'", s.text))
+            && next_of(c) == original_next,
+        "the string and its bytes are back after the array and string-type checks",
+    );
+}
+
+fn patching(
+    c: &Client,
+    funcs: &[FuncRow],
+    binary: &std::path::Path,
+    events: &mut Events,
+    out: &mut String,
+    check: &mut impl FnMut(bool, &str),
+) {
+    writeln!(out, "\n== patching").unwrap();
+    // A multi-byte `mov` in the middle of a function.
+    let mut pick = None;
+    'f: for f in funcs.iter().filter(|f| !f.library && !f.thunk).take(40) {
+        let l = c
+            .call_blocking(ListingDown {
+                ea: f.start,
+                count: 120,
+            })
+            .unwrap();
+        let eas: Vec<Ea> = l.lines.iter().map(|l| l.ea).collect();
+        for w in eas.windows(2).skip(4) {
+            let size = w[1].saturating_sub(w[0]);
+            if (3..=7).contains(&size)
+                && item_text(c, w[0]).starts_with("mov")
+                && c.call_blocking(AddrInfo { ea: w[0] }).unwrap().kind == "code"
+            {
+                pick = Some((w[0], size));
+                break 'f;
+            }
+        }
+    }
+    let Some((ea, size)) = pick else {
+        check(false, "a multi-byte instruction exists to patch");
+        return;
+    };
+    let before_text = item_text(c, ea);
+    let before_hex = c
+        .call_blocking(Bytes {
+            ea,
+            len: size as u32,
+        })
+        .unwrap()
+        .hex;
+    let input_before = std::fs::read(binary).unwrap();
+    writeln!(out, "{ea:#x}: {before_text}  bytes {before_hex}").unwrap();
+    let in_range = |rows: &[PatchRow]| {
+        rows.iter()
+            .filter(|r| r.ea >= ea && r.ea < ea + size)
+            .count()
+    };
+    drain(events);
+
+    // Raw bytes.
+    check(
+        c.call_blocking(PatchBytes {
+            ea,
+            hex: "CC".into(),
+        })
+        .unwrap()
+            == 1,
+        "patch_bytes reports the bytes written",
+    );
+    let ev = drain(events);
+    check(
+        changes(&ev)
+            .iter()
+            .any(|d| d.kinds.iter().any(|k| k == "patch")),
+        "patching emits a db_changed event of kind patch",
+    );
+    let b = c.call_blocking(Bytes { ea, len: 1 }).unwrap();
+    check(
+        b.get(0) == Some(0xCC),
+        "patch_bytes changes the bytes read back",
+    );
+    check(
+        c.call_blocking(PatchBytes {
+            ea,
+            hex: "XYZ".into(),
+        })
+        .is_err()
+            && c.call_blocking(PatchBytes {
+                ea: 0,
+                hex: "90".into(),
+            })
+            .is_err(),
+        "patch_bytes rejects bad hex and unmapped addresses",
+    );
+    let rows = c.call_blocking(PatchList {}).unwrap();
+    let orig0 = u8::from_str_radix(&before_hex[..2], 16).unwrap();
+    check(
+        rows.iter().any(|r| {
+            r.ea == ea && r.original == orig0 && r.patched == 0xCC && r.file_offset.is_some()
+        }),
+        "patch_list shows the address, the original and the patched byte",
+    );
+    let reverted = c.call_blocking(RevertPatches { ea, len: size }).unwrap();
+    let b = c.call_blocking(Bytes { ea, len: 1 }).unwrap();
+    check(
+        reverted == 1
+            && b.get(0) == Some(orig0)
+            && in_range(&c.call_blocking(PatchList {}).unwrap()) == 0,
+        "revert_patches restores the byte and empties the list",
+    );
+
+    // Assemble.
+    let plain = c
+        .call_blocking(Assemble {
+            ea,
+            text: "nop".into(),
+            pad: false,
+        })
+        .unwrap();
+    writeln!(out, "assemble nop: {plain:?}").unwrap();
+    let b = c.call_blocking(Bytes { ea, len: 1 }).unwrap();
+    check(
+        plain.hex == "90"
+            && plain.len == 1
+            && plain.old_len as u64 == size
+            && b.get(0) == Some(0x90),
+        "assemble `nop` yields 0x90 and writes it",
+    );
+    check(
+        item_text(c, ea).starts_with("nop"),
+        "the listing shows the assembled instruction",
+    );
+    check(
+        c.call_blocking(RevertPatches { ea, len: size }).unwrap() == 1
+            && item_text(c, ea) == before_text,
+        "revert_patches after assemble brings the instruction back",
+    );
+    let padded = c
+        .call_blocking(Assemble {
+            ea,
+            text: "nop".into(),
+            pad: true,
+        })
+        .unwrap();
+    let bytes = c
+        .call_blocking(Bytes {
+            ea,
+            len: size as u32,
+        })
+        .unwrap();
+    let nops = c
+        .call_blocking(ListingDown {
+            ea,
+            count: size as u32,
+        })
+        .unwrap()
+        .lines
+        .iter()
+        .filter(|l| {
+            l.ea >= ea && l.ea < ea + size && tags::strip(&l.tagged).trim().starts_with("nop")
+        })
+        .count() as u64;
+    writeln!(
+        out,
+        "assemble nop (padded): {padded:?}, nops in listing: {nops}"
+    )
+    .unwrap();
+    check(
+        padded.hex == "90".repeat(size as usize) && bytes.hex == padded.hex && nops == size,
+        "assemble with pad fills the old instruction with nops",
+    );
+    check(
+        c.call_blocking(Assemble {
+            ea,
+            text: "this is not an instruction".into(),
+            pad: false,
+        })
+        .is_err(),
+        "assemble rejects text that is not an instruction",
+    );
+
+    // Patch list and apply to a copy of the input.
+    let rows = c.call_blocking(PatchList {}).unwrap();
+    for r in rows.iter().filter(|r| r.ea >= ea && r.ea < ea + size) {
+        writeln!(
+            out,
+            "patch {:#x}: {:02X} -> {:02X} file offset {:?}",
+            r.ea, r.original, r.patched, r.file_offset
+        )
+        .unwrap();
+    }
+    let dir = binary.parent().unwrap().join("applied");
+    std::fs::create_dir_all(&dir).unwrap();
+    let output = dir.join("patched.bin");
+    let applied = c
+        .call_blocking(ApplyPatches {
+            output: output.display().to_string(),
+        })
+        .unwrap();
+    let input_after = std::fs::read(binary).unwrap();
+    let patched = std::fs::read(&output).unwrap();
+    let differing: Vec<usize> = (0..patched.len().min(input_after.len()))
+        .filter(|&i| patched[i] != input_after[i])
+        .collect();
+    let mut expected: Vec<usize> = rows
+        .iter()
+        .filter(|r| r.original != r.patched)
+        .filter_map(|r| r.file_offset.map(|o| o as usize))
+        .collect();
+    expected.sort_unstable();
+    writeln!(
+        out,
+        "apply_patches: written={} skipped={} differing offsets {:x?}",
+        applied.written, applied.skipped, differing
+    )
+    .unwrap();
+    check(
+        patched.len() == input_after.len() && !differing.is_empty() && differing == expected,
+        "the applied copy differs from the input exactly at the patched file offsets",
+    );
+    check(
+        rows.iter().all(|r| {
+            r.file_offset
+                .is_none_or(|o| patched[o as usize] == r.patched)
+        }),
+        "the applied copy holds the patched values",
+    );
+    check(
+        input_before == input_after,
+        "apply_patches leaves the input file untouched",
+    );
+    check(
+        c.call_blocking(ApplyPatches {
+            output: binary.display().to_string(),
+        })
+        .is_err()
+            && std::fs::read(binary).unwrap() == input_before,
+        "apply_patches refuses to overwrite the input file",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Revert the whole range; the restored bytes are code again.
+    let reverted = c.call_blocking(RevertPatches { ea, len: size }).unwrap();
+    let after_hex = c
+        .call_blocking(Bytes {
+            ea,
+            len: size as u32,
+        })
+        .unwrap()
+        .hex;
+    let after_text = item_text(c, ea);
+    writeln!(out, "reverted {reverted}: {after_text}  bytes {after_hex}").unwrap();
+    check(
+        after_hex == before_hex && in_range(&c.call_blocking(PatchList {}).unwrap()) == 0,
+        "revert_patches restores the original bytes and leaves no patches",
+    );
+    check(
+        after_text == before_text,
+        "revert_patches disassembles the restored bytes again",
+    );
+}
+
+fn marks(
+    c: &Client,
+    funcs: &[FuncRow],
+    events: &mut Events,
+    out: &mut String,
+    check: &mut impl FnMut(bool, &str),
+) -> (Ea, String) {
+    writeln!(out, "\n== marked positions").unwrap();
+    let a = funcs[0].start;
+    let b = funcs[funcs.len() / 2].start;
+    let keep = format!("e2e mark {a:#x}");
+    drain(events);
+    let slot_a = c
+        .call_blocking(MarkSet {
+            ea: a,
+            desc: "first".into(),
+        })
+        .unwrap();
+    let ev = drain(events);
+    check(
+        changes(&ev)
+            .iter()
+            .any(|d| d.kinds.iter().any(|k| k == "display") && d.lo.is_some_and(|lo| lo <= a)),
+        "marking a position emits a display change at the address",
+    );
+    let list = c.call_blocking(MarkList {}).unwrap();
+    check(
+        list.iter()
+            .any(|m| m.slot == slot_a && m.ea == a && m.desc == "first"),
+        "mark_list shows the new mark",
+    );
+    let again = c
+        .call_blocking(MarkSet {
+            ea: a,
+            desc: keep.clone(),
+        })
+        .unwrap();
+    let list = c.call_blocking(MarkList {}).unwrap();
+    check(
+        again == slot_a
+            && list.iter().filter(|m| m.ea == a).count() == 1
+            && list.iter().any(|m| m.ea == a && m.desc == keep),
+        "marking the same address again replaces the description in the same slot",
+    );
+    let slot_b = c
+        .call_blocking(MarkSet {
+            ea: b,
+            desc: "second".into(),
+        })
+        .unwrap();
+    check(slot_b != slot_a, "a second address gets its own slot");
+    c.call_blocking(MarkDelete { slot: slot_b }).unwrap();
+    let list = c.call_blocking(MarkList {}).unwrap();
+    writeln!(out, "marks: {list:?}").unwrap();
+    check(
+        !list.iter().any(|m| m.ea == b) && list.iter().any(|m| m.ea == a),
+        "mark_delete removes only that mark",
+    );
+    check(
+        c.call_blocking(MarkDelete { slot: slot_b }).is_err(),
+        "mark_delete of an empty slot fails",
+    );
+    (a, keep)
+}
+
+fn function_properties(
+    c: &Client,
+    funcs: &[FuncRow],
+    avoid: Ea,
+    events: &mut Events,
+    out: &mut String,
+    check: &mut impl FnMut(bool, &str),
+) {
+    writeln!(out, "\n== edit function").unwrap();
+    // The smallest ordinary function with a few instructions.
+    let f = funcs
+        .iter()
+        .filter(|f| !f.library && !f.thunk && f.start != avoid && f.end - f.start >= 12)
+        .min_by_key(|f| f.end - f.start)
+        .unwrap();
+    let info = c.call_blocking(FuncEditInfo { ea: f.start }).unwrap();
+    writeln!(out, "{info:?}").unwrap();
+    check(
+        info.start == f.start && info.end == f.end && info.name == f.name,
+        "func_edit_info agrees with the function list",
+    );
+    let lines = c
+        .call_blocking(ListingDown {
+            ea: f.start,
+            count: 200,
+        })
+        .unwrap();
+    let new_end = lines
+        .lines
+        .iter()
+        .map(|l| l.ea)
+        .filter(|&e| e > f.start && e < f.end)
+        .max()
+        .unwrap();
+    drain(events);
+    c.call_blocking(EditFunc {
+        ea: f.start,
+        edit: FuncEdit {
+            end: Some(new_end),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    let ev = drain(events);
+    let moved = c
+        .call_blocking(Functions {})
+        .unwrap()
+        .into_iter()
+        .find(|g| g.start == f.start)
+        .unwrap();
+    check(
+        moved.end == new_end
+            && c.call_blocking(FuncEditInfo { ea: f.start }).unwrap().end == new_end,
+        "edit_func moves the end of the function",
+    );
+    check(
+        changes(&ev)
+            .iter()
+            .any(|d| d.kinds.iter().any(|k| k == "func")),
+        "edit_func emits a db_changed event of kind func",
+    );
+    c.call_blocking(EditFunc {
+        ea: f.start,
+        edit: FuncEdit {
+            end: Some(f.end),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    check(
+        c.call_blocking(FuncEditInfo { ea: f.start }).unwrap().end == f.end,
+        "edit_func puts the end back",
+    );
+
+    let flags = |c: &Client| {
+        c.call_blocking(FuncSummary { ea: f.start })
+            .unwrap()
+            .unwrap()
+            .flags
+    };
+    let base_flags = flags(c);
+    c.call_blocking(EditFunc {
+        ea: f.start,
+        edit: FuncEdit {
+            noret: Some(true),
+            static_def: Some(true),
+            library: Some(true),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    let after = flags(c);
+    let ai = c.call_blocking(FuncEditInfo { ea: f.start }).unwrap();
+    writeln!(out, "flags {base_flags:?} -> {after:?}").unwrap();
+    check(
+        ai.noret && ai.static_def && ai.library,
+        "edit_func sets noret, static and library",
+    );
+    check(
+        ["noreturn", "static", "lib"]
+            .iter()
+            .all(|w| after.iter().any(|f| f == w)),
+        "the function summary shows the flags edit_func set",
+    );
+    c.call_blocking(EditFunc {
+        ea: f.start,
+        edit: FuncEdit {
+            noret: Some(info.noret),
+            static_def: Some(info.static_def),
+            library: Some(info.library),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    check(flags(c) == base_flags, "edit_func clears the flags again");
+
+    c.call_blocking(EditFunc {
+        ea: f.start,
+        edit: FuncEdit {
+            locals: Some(info.locals + 0x20),
+            saved_regs: Some(8),
+            purged: Some(0x10),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    let sized = c.call_blocking(FuncEditInfo { ea: f.start }).unwrap();
+    writeln!(
+        out,
+        "sizes: locals={} saved={} purged={}",
+        sized.locals, sized.saved_regs, sized.purged
+    )
+    .unwrap();
+    check(
+        sized.locals == info.locals + 0x20 && sized.saved_regs == 8 && sized.purged == 0x10,
+        "edit_func sets the local, saved-register and purged sizes",
+    );
+    c.call_blocking(EditFunc {
+        ea: f.start,
+        edit: FuncEdit {
+            locals: Some(info.locals),
+            saved_regs: Some(info.saved_regs),
+            purged: Some(info.purged),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    let back = c.call_blocking(FuncEditInfo { ea: f.start }).unwrap();
+    check(
+        back.locals == info.locals
+            && back.saved_regs == info.saved_regs
+            && back.purged == info.purged,
+        "edit_func restores the frame sizes",
+    );
+    check(
+        c.call_blocking(EditFunc {
+            ea: 0,
+            edit: FuncEdit::default(),
+        })
+        .is_err()
+            && c.call_blocking(EditFunc {
+                ea: f.start,
+                edit: FuncEdit {
+                    end: Some(f.start),
+                    ..Default::default()
+                },
+            })
+            .is_err(),
+        "edit_func rejects an address outside functions and an end below the start",
+    );
+}
+
 /// Analysis progress on open: monotonic, ends done, counts the functions.
 fn analysis_events(
     events: &[HostEvent],
@@ -2795,6 +3861,20 @@ fn main() {
         );
     }
 
+    operand_representation(&client, &funcs, &mut events, &mut out, &mut check);
+    arrays_and_strings(&client, &strings, funcs[0].start, &mut out, &mut check);
+    patching(&client, &funcs, &binary, &mut events, &mut out, &mut check);
+    function_properties(
+        &client,
+        &funcs,
+        big.start,
+        &mut events,
+        &mut out,
+        &mut check,
+    );
+    let (mark_ea, mark_desc) = marks(&client, &funcs, &mut events, &mut out, &mut check);
+    eprintln!("[{:6.1}s] edit menu", t0.elapsed().as_secs_f32());
+
     signatures_lumina_proximity(&client, &binary, &mut out, &mut check);
     python_and_events(
         &client,
@@ -2867,6 +3947,16 @@ fn main() {
                 let kept = f.iter().any(|f| f.start == target && f.name == "e2e_saved");
                 writeln!(out, "reopen via {label}: rename kept = {kept}").unwrap();
                 check(kept, &format!("rename survives save + reopen via {label}"));
+                let kept_mark = c
+                    .call_blocking(MarkList {})
+                    .unwrap()
+                    .iter()
+                    .any(|m| m.ea == mark_ea && m.desc == mark_desc);
+                writeln!(out, "reopen via {label}: mark kept = {kept_mark}").unwrap();
+                check(
+                    kept_mark,
+                    &format!("a marked position survives save + reopen via {label}"),
+                );
                 let types = c.call_blocking(TypeList {}).unwrap();
                 check(
                     types.iter().any(|t| t.name == "E2eHolder")

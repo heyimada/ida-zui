@@ -484,6 +484,11 @@ bool ev_stop_requested(void)
   return g_stop_auto.load();
 }
 
+void ev_note_display(ea_t ea)
+{
+  note_ea(K_DISPLAY, ea);
+}
+
 void ev_run_auto(bool always)
 {
   const bool trace = qgetenv("IZS_AUTO_TRACE", nullptr);
