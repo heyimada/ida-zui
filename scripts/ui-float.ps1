@@ -33,6 +33,9 @@ $steps2 = @(
     # a second window, a listing: the structure chooser opens in it
     "win:0", "action:ida::NewListingTab", "wait:2000", "action:ida::MoveToNewWindow", "wait:3000",
     "win:2", "action:ida::OpStructOffset", "wait:2000", "shot:float_chooser", "win:1", "shot:float_chooser_other", "win:2", "key:escape", "wait:400",
+    # a main-window command says so; the patch list opens in the window
+    "action:ida::NextTab", "wait:500", "shot:float_unavailable",
+    "action:ida::ShowPatches", "wait:1500", "shot:float_patches", "key:escape", "wait:400",
     # closing returns the views as tabs
     "action:ida::CloseTab", "wait:2000", "win:1", "action:ida::CloseTab", "wait:2500", "win:0", "shot:float_docked"
 )

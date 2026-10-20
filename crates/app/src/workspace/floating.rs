@@ -589,6 +589,13 @@ impl FloatingWindow {
         );
     }
 
+    /// A command that only makes sense in the main window.
+    fn unavailable(&self, cx: &mut Context<Self>) {
+        self.session.update(cx, |s, cx| {
+            s.info_msg("Not available in a floating window", cx)
+        });
+    }
+
     /// Runs `f` on the workspace (the operand commands and the like).
     fn forward(
         &self,
@@ -715,6 +722,66 @@ impl Render for FloatingWindow {
             .on_action(cx.listener(|this, _: &OpInvert, _, cx| {
                 this.forward(cx, |w, cx| w.operand_flip(false, cx))
             }))
+            .on_action(cx.listener(|this, _: &DebugStart, _, cx| {
+                this.session.update(cx, |s, cx| s.dbg_start_or_continue(cx))
+            }))
+            .on_action(cx.listener(|this, _: &DebugPause, _, cx| {
+                this.session.update(cx, |s, cx| s.dbg_pause(cx))
+            }))
+            .on_action(cx.listener(|this, _: &DebugTerminate, _, cx| {
+                this.session.update(cx, |s, cx| s.dbg_terminate(cx))
+            }))
+            .on_action(cx.listener(|this, _: &DebugDetach, _, cx| {
+                this.session.update(cx, |s, cx| s.dbg_detach(cx))
+            }))
+            .on_action(cx.listener(|this, _: &DebugStepInto, _, cx| {
+                this.session.update(cx, |s, cx| {
+                    s.dbg_resume(ida_proto::ResumeHow::StepInto, 0, cx)
+                })
+            }))
+            .on_action(cx.listener(|this, _: &DebugStepOver, _, cx| {
+                this.session.update(cx, |s, cx| {
+                    s.dbg_resume(ida_proto::ResumeHow::StepOver, 0, cx)
+                })
+            }))
+            .on_action(cx.listener(|this, _: &DebugStepOut, _, cx| {
+                this.session.update(cx, |s, cx| {
+                    s.dbg_resume(ida_proto::ResumeHow::StepOut, 0, cx)
+                })
+            }))
+            .on_action(cx.listener(|this, _: &DebugRunToCursor, _, cx| {
+                let ea = this.session.read(cx).cursor;
+                this.session.update(cx, |s, cx| {
+                    s.dbg_resume(ida_proto::ResumeHow::RunTo, ea, cx)
+                })
+            }))
+            .on_action(cx.listener(|this, _: &ToggleBreakpoint, _, cx| {
+                let ea = this.session.read(cx).cursor;
+                this.session.update(cx, |s, cx| s.dbg_toggle_bpt(ea, cx))
+            }))
+            .on_action(cx.listener(|this, _: &MarkPosition, _, cx| {
+                this.forward(cx, |w, cx| w.mark_position(cx))
+            }))
+            .on_action(cx.listener(|this, _: &JumpToMark, window, cx| {
+                this.forward(cx, |w, cx| w.jump_to_mark(window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &ShowPatches, window, cx| {
+                this.forward(cx, |w, cx| w.show_patches(window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &PatchApply, window, cx| {
+                this.forward(cx, |w, cx| w.patch_apply(window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &DebugAttach, _, cx| this.unavailable(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSplit, _, cx| this.unavailable(cx)))
+            .on_action(cx.listener(|this, _: &MoveToOtherPane, _, cx| this.unavailable(cx)))
+            .on_action(cx.listener(|this, _: &MoveToNewWindow, _, cx| this.unavailable(cx)))
+            .on_action(cx.listener(|this, _: &NextTab, _, cx| this.unavailable(cx)))
+            .on_action(cx.listener(|this, _: &PrevTab, _, cx| this.unavailable(cx)))
+            .on_action(cx.listener(|this, _: &ShowListing, _, cx| this.unavailable(cx)))
+            .on_action(cx.listener(|this, _: &ShowGraph, _, cx| this.unavailable(cx)))
+            .on_action(cx.listener(|this, _: &ShowHex, _, cx| this.unavailable(cx)))
+            .on_action(cx.listener(|this, _: &ShowPseudocode, _, cx| this.unavailable(cx)))
+            .on_action(cx.listener(|this, _: &TogglePseudocode, _, cx| this.unavailable(cx)))
             .on_action(cx.listener(|this, _: &OpOffsetBase, _, cx| {
                 this.forward(cx, |w, cx| w.operand_offset_base(cx))
             }))
@@ -853,5 +920,53 @@ impl Render for FloatingWindow {
                         ),
                 )
             })
+    }
+}
+
+/// A saved window rectangle `[x, y, w, h]` made to fit the displays now present: kept when its
+/// title bar (top-left area) is on one of them, otherwise moved onto the primary display and
+/// never larger than it.
+pub fn fit_to_displays(win: [f32; 4], displays: &[[f32; 4]], primary: [f32; 4]) -> [f32; 4] {
+    let on = |d: &[f32; 4]| {
+        // Where the user grabs the window: a point just inside its top-left corner.
+        let (gx, gy) = (win[0] + 40_f32.min(win[2]), win[1] + 10_f32.min(win[3]));
+        gx >= d[0] && gx < d[0] + d[2] && gy >= d[1] && gy < d[1] + d[3]
+    };
+    if displays.iter().any(on) {
+        return win;
+    }
+    let w = win[2].min(primary[2]);
+    let h = win[3].min(primary[3]);
+    [
+        primary[0] + ((primary[2] - w) / 2.).max(0.),
+        primary[1] + ((primary[3] - h) / 2.).max(0.),
+        w,
+        h,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_to_displays;
+
+    const PRIMARY: [f32; 4] = [0., 0., 1920., 1080.];
+    const SECOND: [f32; 4] = [1920., 0., 1920., 1080.];
+
+    #[test]
+    fn a_window_on_a_present_display_stays() {
+        let w = [2000., 100., 900., 700.];
+        assert_eq!(fit_to_displays(w, &[PRIMARY, SECOND], PRIMARY), w);
+    }
+
+    #[test]
+    fn a_window_on_a_missing_display_moves_to_the_primary() {
+        let got = fit_to_displays([2000., 100., 900., 700.], &[PRIMARY], PRIMARY);
+        assert_eq!(got, [510., 190., 900., 700.]);
+    }
+
+    #[test]
+    fn a_window_far_off_screen_is_recovered_and_shrunk_to_fit() {
+        let got = fit_to_displays([-9000., -9000., 4000., 3000.], &[PRIMARY], PRIMARY);
+        assert_eq!(got, [0., 0., 1920., 1080.]);
     }
 }

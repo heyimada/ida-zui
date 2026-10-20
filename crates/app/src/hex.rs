@@ -811,6 +811,16 @@ impl HexView {
         canvas(
             |_, _, _| (),
             move |bounds, (), window, cx| {
+                if entity.read(cx).drag_from.is_some() {
+                    // The element only hears moves over itself; a drag that leaves it
+                    // (to autoscroll) needs them everywhere.
+                    let e = entity.clone();
+                    window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
+                        if phase == gpui::DispatchPhase::Bubble {
+                            e.update(cx, |v, cx| v.on_mouse_move(ev, window, cx));
+                        }
+                    });
+                }
                 let theme = Theme::get(cx);
                 let cw = code::char_width(window);
                 let v = entity.read(cx);

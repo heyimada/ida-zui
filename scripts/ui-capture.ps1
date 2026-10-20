@@ -21,6 +21,7 @@
 #   drop:<path>[|<path>]  simulate files dropped on the window (in-process, via gpui's file-drop events)
 #   clipboard:<text>   seed the app's in-process clipboard (the system clipboard is never touched)
 #   clipdump           print the in-process clipboard (and log it; newlines show as \n)
+#   cliplines:<n> / cliplen:<n>  fail unless the in-process clipboard holds at least n lines / characters
 #   clipassert:<text>  like clipdump, then compare with <text> (write newlines as \n); a mismatch fails the script
 #   marker:<name>      wait until the app has executed everything queued so far
 #   shot:<name>        save the window as artifacts/ui/<name>.png
@@ -203,6 +204,20 @@ try {
                 $got = if ($line) { $line.Substring("clipboard: ".Length) } else { "<none>" }
                 if ($got -ceq $arg) { Note "PASS clipassert: $got" }
                 else { Note "FAIL clipassert: expected [$arg] got [$got]"; $failed = $true }
+            }
+            { $_ -in "cliplines", "cliplen" } {
+                # The in-process clipboard has at least <arg> lines (newlines are shown as backslash-n) or characters.
+                $syncName = "cliplen-" + [guid]::NewGuid().ToString("N")
+                Send "clipdump"
+                Send "marker $syncName"
+                $done = Join-Path $work "automation.txt.done"
+                $until = (Get-Date).AddSeconds(30)
+                while ((Get-Date) -lt $until -and -not ((Test-Path $done) -and ((Get-Content $done) -contains $syncName))) { Start-Sleep -Milliseconds 100 }
+                $line = Get-Content $done | Where-Object { $_ -like "clipboard:*" } | Select-Object -Last 1
+                $got = if ($line) { $line.Substring("clipboard: ".Length) } else { "" }
+                $have = if ($kind -eq "cliplines") { ([regex]::Matches($got, '\\n')).Count + 1 } else { $got.Length }
+                if ($have -ge [int]$arg) { Note "PASS ${kind}: $have >= $arg" }
+                else { Note "FAIL ${kind}: $have < $arg"; $failed = $true }
             }
             "clipboard" { Send "clipboard $arg" }
             "drop" { Send "drop $arg" }

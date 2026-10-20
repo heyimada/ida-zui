@@ -136,6 +136,23 @@ impl Workspace {
         // Torn-off views open as windows again, where they were.
         for (t, id) in saved.tabs.iter().zip(&ids) {
             if let (Some(f), Some(id)) = (t.float, id) {
+                // On a monitor that is gone: onto the primary one.
+                let rect = |b: gpui::Bounds<gpui::Pixels>| {
+                    [
+                        f32::from(b.origin.x),
+                        f32::from(b.origin.y),
+                        f32::from(b.size.width),
+                        f32::from(b.size.height),
+                    ]
+                };
+                let displays: Vec<[f32; 4]> =
+                    cx.displays().iter().map(|d| rect(d.bounds())).collect();
+                let f = match cx.primary_display().map(|d| rect(d.bounds())) {
+                    Some(primary) if !displays.is_empty() => {
+                        super::floating::fit_to_displays(f, &displays, primary)
+                    }
+                    _ => f,
+                };
                 let bounds = gpui::Bounds::new(
                     gpui::point(gpui::px(f[0]), gpui::px(f[1])),
                     gpui::size(gpui::px(f[2].max(360.)), gpui::px(f[3].max(240.))),
@@ -331,7 +348,8 @@ impl Workspace {
         let ws = cx.weak_entity();
         let close_all = |ids: Vec<u64>, ws: gpui::WeakEntity<Workspace>| {
             move |window: &mut Window, cx: &mut App| {
-                let _ = ws.update(cx, |w, cx| {
+                let ids = ids.clone();
+                later(&ws, window, cx, move |w, window, cx| {
                     for t in &ids {
                         w.close_doc(*t, window, cx);
                     }
@@ -353,7 +371,9 @@ impl Workspace {
             "Move to other pane",
             "",
             move |window: &mut Window, cx: &mut App| {
-                let _ = w1.update(cx, |w, cx| w.move_tab(id, !right, None, window, cx));
+                later(&w1, window, cx, move |w, window, cx| {
+                    w.move_tab(id, !right, None, window, cx)
+                });
             },
         ));
         if is_code {
@@ -362,7 +382,9 @@ impl Workspace {
                 "Move to new window",
                 "",
                 move |window: &mut Window, cx: &mut App| {
-                    let _ = w2.update(cx, |w, cx| w.tear_off(id, window, cx));
+                    later(&w2, window, cx, move |w, window, cx| {
+                        w.tear_off(id, window, cx)
+                    });
                 },
             ));
         }
@@ -622,4 +644,20 @@ impl gpui::Render for TabDrag {
             .text_color(crate::theme::hsla(t.text))
             .child(self.title.clone())
     }
+}
+
+/// Runs `f` on the workspace once the update that invoked a menu entry is over (the
+/// menu's commands run inside the workspace's own event handler).
+fn later(
+    ws: &gpui::WeakEntity<Workspace>,
+    window: &Window,
+    cx: &mut App,
+    f: impl FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+) {
+    let (ws, handle) = (ws.clone(), window.window_handle());
+    cx.defer(move |cx| {
+        let _ = handle.update(cx, |_, window, cx| {
+            let _ = ws.update(cx, |w, cx| f(w, window, cx));
+        });
+    });
 }
