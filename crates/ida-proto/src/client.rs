@@ -73,10 +73,15 @@ impl HostConfig {
     pub fn discover() -> Self {
         let exe = std::env::current_exe().unwrap_or_default();
         let mut host_exe = exe.with_file_name("ida-host.exe");
+        // Examples run from target\<profile>\examples; the host sits one up.
         if !host_exe.exists()
-            && let Some(parent) = exe.parent().and_then(Path::parent)
+            && let Some(up) = exe
+                .parent()
+                .and_then(Path::parent)
+                .map(|p| p.join("ida-host.exe"))
+                .filter(|p| p.exists())
         {
-            host_exe = parent.join("ida-host.exe");
+            host_exe = up;
         }
         let ida_dir = std::env::var_os("IDADIR")
             .map(PathBuf::from)

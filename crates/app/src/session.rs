@@ -712,9 +712,6 @@ impl Session {
         .detach();
     }
 
-    /// Closes the database, saving if asked, and resolves once the host has
-    /// acknowledged and exited. A host that does not answer within
-    /// `CLOSE_TIMEOUT` is killed so it cannot block the caller forever.
     /// Ends a host that is stuck inside a call that cannot be interrupted.
     /// The database is gone without a save; the tab shows why.
     pub fn kill_host(&mut self, cx: &mut Context<Self>) {
@@ -723,9 +720,13 @@ impl Session {
             c.kill();
         }
         // The killed host leaves its unpacked working files behind; IDA
-        // would pick them up as if they were a crashed session's.
-        if let Some(idb) = idb {
-            std::thread::spawn(move || remove_unpacked(std::path::Path::new(&idb)));
+        // would pick them up as if they were a crashed session's. Only when a
+        // packed database exists, though: without one the unpacked files may
+        // be the user's only copy.
+        if let Some(idb) = idb.map(std::path::PathBuf::from)
+            && idb.is_file()
+        {
+            std::thread::spawn(move || remove_unpacked(&idb));
         }
         self.phase = Phase::Failed(
             "The IDA host was killed. Unsaved changes were lost; open the file again to continue."
@@ -742,6 +743,9 @@ impl Session {
         cx.notify();
     }
 
+    /// Closes the database, saving if asked, and resolves once the host has
+    /// acknowledged and exited. A host that does not answer within
+    /// `CLOSE_TIMEOUT` is killed so it cannot block the caller forever.
     pub fn close(&mut self, save: bool, cx: &mut Context<Self>) -> Task<()> {
         let analyzing = self.analyzing();
         let client = self.client.take();

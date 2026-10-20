@@ -57,7 +57,7 @@ Nothing open: S1 to S4 are resolved (see Phase 8a below).
 - **L3 Long blocks:** blocks over 40 lines fold to 14 head + chip + 14 tail lines; the chip, Enter on it, or a jump into the hidden part expands the block (screenshot).
 - **E2 Unterminated comment:** `declerr::unterminated_comment` (tests first) marks the line and warns on Apply (screenshot).
 - **P1 IDC console:** a Python / IDC button in the console header; IDC runs through `ida_expr.eval_idc_expr` / `compile_idc_snippet` (screenshots: `2+2`, `auto x = 5; ... Message(...)`, errors).
-- **P4 Kill host:** 4 s after Cancel the strip offers "Kill host..." (second click kills, with the unsaved warning); the unpacked database files are removed (screenshots).
+- **P4 Kill host:** 4 s after Cancel the strip offers "Kill host..." (second click kills, with the unsaved warning); the unpacked database files are removed when a packed `.i64` exists, so an unpacked-only database is never deleted (screenshots).
 - **M5 Recent badge**, **M6 Names group** (non-function names, header says so; an exact name match now ranks first), **M7 themes** (High contrast and IDA Classic tuned; a unit test asserts 4.5:1 for every text token on every surface).
 - **H2:** list sections of the E2E dump are capped at 200 entries plus the count (not re-run on shell32.dll).
 - **Proximity, off-screen nodes (L8 leftover):** after a + expansion or opening a "+N more" chip the view pans, and zooms out down to 30% if needed, until the new nodes and their anchor are in view (it does nothing when they already are). Screenshots: expanding `__mainCRTStartup`'s callees, and opening the callee chip of `FIND::Initialize`.

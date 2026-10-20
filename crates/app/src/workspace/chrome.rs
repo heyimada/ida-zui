@@ -1059,9 +1059,8 @@ impl Workspace {
             .text_color(hsla(t.muted));
         if !ready {
             let loading = matches!(s.phase, Phase::Loading { .. });
-            let setup_problem = ida_proto::client::HostConfig::discover()
-                .problem()
-                .is_some();
+            let problem = ida_proto::client::HostConfig::discover().problem();
+            let setup_problem = problem.is_some();
             return bar
                 .child(div().child(if loading {
                     "Opening a database…"
@@ -1078,10 +1077,12 @@ impl Workspace {
                             6.,
                             if setup_problem { t.danger } else { t.success },
                         ))
-                        .child(if setup_problem {
-                            "IDA not found"
-                        } else {
-                            "idalib ready"
+                        .child(match problem {
+                            Some(ida_proto::client::SetupProblem::HostMissing(_)) => {
+                                "ida-host.exe missing"
+                            }
+                            Some(ida_proto::client::SetupProblem::IdaMissing) => "IDA not found",
+                            None => "idalib ready",
                         }),
                 );
         }

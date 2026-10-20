@@ -88,7 +88,7 @@ The defaults follow IDA's `cfg/idagui.cfg` where IDA has a key. Every key is edi
 | Undo / redo | `Ctrl+Z` / `Ctrl+Shift+Z` | same (`Ctrl+Y` too) |
 | Debugger | `F9` `F7` `F8` `F2` `Ctrl+F2` `F4` | same |
 
-Differences: the side lists live in a rail on the left instead of floating windows; because `Ctrl+B` is IDA's "search bytes again", the side-panel filter moved to `Ctrl+Shift+B`; saving is `Ctrl+S` (IDA has no key for it) and a database that was just analysed counts as unsaved; there is no database snapshot manager; plugins that need IDA's Qt UI report that they cannot run headless; the debugger is Windows user mode only.
+Differences: the side lists live in a rail on the left instead of floating windows; because `Ctrl+B` is IDA's "search bytes again", the side-panel filter moved to `Ctrl+Shift+B`; saving is `Ctrl+S` (IDA uses `Ctrl+W`) and a database that was just analysed counts as unsaved; there is no database snapshot manager; plugins that need IDA's Qt UI report that they cannot run headless; the debugger is Windows user mode only.
 
 ## Architecture
 
