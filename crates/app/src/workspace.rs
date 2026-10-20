@@ -3,6 +3,7 @@
 // `chrome`; the panels are entities of their own.
 mod chrome;
 mod debug;
+mod edit;
 
 use crate::actions::*;
 use crate::bottom::{BottomEvent, BottomPanel, BottomTab};
@@ -279,6 +280,17 @@ impl Workspace {
         let Some(ix) = self.index_of(id) else { return };
         let active = ix == self.active;
         match ev {
+            SessionEvent::ContextMenu(req) if active => {
+                let (pos, title, entries, keyboard) = (
+                    req.pos,
+                    req.title.clone(),
+                    req.entries.clone(),
+                    req.keyboard,
+                );
+                self.menubar.update(cx, |m, cx| {
+                    m.open_popup(pos, title, entries, keyboard, window, cx)
+                });
+            }
             SessionEvent::Prompt(req) if active => {
                 let req = req.clone();
                 self.open_modal(
@@ -1513,6 +1525,7 @@ impl Workspace {
             Target::CodeFontSize(size) => settings::update(cx, |s| s.code_font_size = size),
             Target::Recent(path) => self.open_path(PathBuf::from(path), window, cx),
             Target::ClearRecent => settings::update(cx, |s| s.recent.clear()),
+            Target::Run(f) => f(window, cx),
             Target::Database(id) => {
                 if let Some(ix) = self.index_of(id) {
                     self.activate(ix, window, cx);
@@ -1665,6 +1678,11 @@ impl Workspace {
                 let key = key.clone();
                 self.close_modal(window, cx);
                 self.open_doc(key, window, cx);
+            }
+            ModalEvent::Pick(ChoiceValue::Run(f)) => {
+                let f = f.clone();
+                self.close_modal(window, cx);
+                f(cx);
             }
             ModalEvent::Pick(ChoiceValue::Action(action)) => {
                 let action = action.boxed_clone();
@@ -2394,7 +2412,9 @@ impl Render for Workspace {
                 active: i == self.active,
             })
             .collect();
+        let ops = self.session.read(cx).ops();
         self.menubar.update(cx, |m, _| {
+            m.ops = ops;
             m.view = state;
             m.ready = ready;
             m.dbs = dbs;
@@ -2738,6 +2758,54 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &NextFunction, _, cx| w.step_function(true, cx)))
             .on_action(cx.listener(|w, _: &PrevFunction, _, cx| w.step_function(false, cx)))
             .on_action(cx.listener(|w, _: &ResetLayout, window, cx| w.reset_layout(window, cx)))
+            .on_action(cx.listener(|w, _: &OpHexDec, _, cx| w.operand_hex_or_decimal(cx)))
+            .on_action(cx.listener(|w, _: &OpHex, _, cx| w.set_operand(ida_proto::OpRepr::Hex, cx)))
+            .on_action(
+                cx.listener(|w, _: &OpDecimal, _, cx| {
+                    w.set_operand(ida_proto::OpRepr::Decimal, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|w, _: &OpOctal, _, cx| w.set_operand(ida_proto::OpRepr::Octal, cx)),
+            )
+            .on_action(
+                cx.listener(|w, _: &OpBinary, _, cx| w.set_operand(ida_proto::OpRepr::Binary, cx)),
+            )
+            .on_action(
+                cx.listener(|w, _: &OpChar, _, cx| w.set_operand(ida_proto::OpRepr::Char, cx)),
+            )
+            .on_action(cx.listener(|w, _: &OpOffset, _, cx| {
+                w.set_operand(ida_proto::OpRepr::Offset { base: None }, cx)
+            }))
+            .on_action(cx.listener(|w, _: &OpOffsetBase, _, cx| w.operand_offset_base(cx)))
+            .on_action(cx.listener(|w, _: &OpStructOffset, window, cx| {
+                w.operand_type_chooser(false, window, cx)
+            }))
+            .on_action(
+                cx.listener(|w, _: &OpEnum, window, cx| w.operand_type_chooser(true, window, cx)),
+            )
+            .on_action(cx.listener(|w, _: &OpStackVar, _, cx| {
+                w.set_operand(ida_proto::OpRepr::StackVar, cx)
+            }))
+            .on_action(cx.listener(|w, _: &OpNegate, _, cx| w.operand_flip(true, cx)))
+            .on_action(cx.listener(|w, _: &OpInvert, _, cx| w.operand_flip(false, cx)))
+            .on_action(
+                cx.listener(|w, _: &OpClear, _, cx| w.set_operand(ida_proto::OpRepr::Clear, cx)),
+            )
+            .on_action(cx.listener(|w, _: &DefineArray, window, cx| w.define_array(window, cx)))
+            .on_action(
+                cx.listener(|w, _: &SetStringType, window, cx| w.set_string_type(window, cx)),
+            )
+            .on_action(
+                cx.listener(|w, _: &EditFunctionProps, window, cx| w.edit_function(window, cx)),
+            )
+            .on_action(
+                cx.listener(|w, _: &PatchChangeBytes, window, cx| w.patch_change_bytes(window, cx)),
+            )
+            .on_action(cx.listener(|w, _: &PatchAssemble, window, cx| w.patch_assemble(window, cx)))
+            .on_action(cx.listener(|w, _: &PatchRevert, _, cx| w.patch_revert(cx)))
+            .on_action(cx.listener(|w, _: &ShowPatches, window, cx| w.show_patches(window, cx)))
+            .on_action(cx.listener(|w, _: &PatchApply, window, cx| w.patch_apply(window, cx)))
             .on_action(cx.listener(|_, _: &ShowDocumentation, _, cx| {
                 crate::automation::open_url(crate::help::DOCS_URL, cx)
             }))
@@ -2810,6 +2878,12 @@ impl Render for Workspace {
                         .occlude()
                         .on_mouse_down(
                             gpui::MouseButton::Left,
+                            cx.listener(|w, _, window, cx| {
+                                w.menubar.update(cx, |m, cx| m.close(window, cx))
+                            }),
+                        )
+                        .on_mouse_down(
+                            gpui::MouseButton::Right,
                             cx.listener(|w, _, window, cx| {
                                 w.menubar.update(cx, |m, cx| m.close(window, cx))
                             }),

@@ -10,11 +10,12 @@ use crate::theme::{Theme, code_font_name, hsla};
 use crate::ui::{self, icon};
 use gpui::{
     Action, App, Context, EventEmitter, FocusHandle, Focusable, HighlightStyle, KeyDownEvent,
-    MouseButton, ScrollHandle, SharedString, StyledText, Subscription, UnderlineStyle, Window,
-    deferred, div, prelude::*, px, relative,
+    MouseButton, Pixels, Point, ScrollHandle, SharedString, StyledText, Subscription,
+    UnderlineStyle, Window, anchored, deferred, div, prelude::*, px, relative,
 };
 use std::ops::Range;
 use std::path::Path;
+use std::rc::Rc;
 
 pub const BAR_HEIGHT: f32 = 28.;
 const ROW_HEIGHT: f32 = 26.;
@@ -41,6 +42,9 @@ pub enum Target {
     ClearRecent,
     /// Bring the database tab with this id forward.
     Database(u64),
+    /// Something a context menu entry does with data it captured (jump to a
+    /// row's address, copy its name).
+    Run(Rc<dyn Fn(&mut Window, &mut App)>),
 }
 
 impl Clone for Target {
@@ -52,6 +56,7 @@ impl Clone for Target {
             Self::Recent(p) => Self::Recent(p.clone()),
             Self::ClearRecent => Self::ClearRecent,
             Self::Database(id) => Self::Database(*id),
+            Self::Run(f) => Self::Run(f.clone()),
         }
     }
 }
@@ -70,6 +75,8 @@ pub struct Item {
 pub enum Entry {
     Item(Item),
     Sep,
+    /// A caption (a context menu's title): never highlighted, no mnemonic.
+    Header(SharedString),
     Sub {
         label: SharedString,
         enabled: bool,
@@ -101,7 +108,7 @@ fn entry_label(e: &Entry) -> Option<&SharedString> {
     match e {
         Entry::Item(i) => Some(&i.label),
         Entry::Sub { label, .. } => Some(label),
-        Entry::Sep => None,
+        Entry::Sep | Entry::Header(_) => None,
     }
 }
 
@@ -141,7 +148,7 @@ impl Entry {
         match self {
             Entry::Item(i) => i.enabled,
             Entry::Sub { enabled, .. } => *enabled,
-            Entry::Sep => false,
+            Entry::Sep | Entry::Header(_) => false,
         }
     }
 }
@@ -166,21 +173,57 @@ pub struct DbEntry {
     pub active: bool,
 }
 
+/// A menu entry for the catalog command `name`: its label (or `label`), the
+/// live shortcut, and disabled when it needs a database and there is none.
+pub fn command_entry(name: &str, label: Option<&str>, ready: bool, cx: &App) -> Entry {
+    let c = actions::find(name).unwrap_or_else(|| panic!("menu refers to unknown command {name}"));
+    let action = (c.make)();
+    Entry::Item(Item {
+        label: label.unwrap_or(c.label).to_owned().into(),
+        detail: SharedString::default(),
+        shortcut: actions::shortcut_text(&*action, cx).into(),
+        enabled: ready || !c.needs_db,
+        checked: false,
+        target: Target::Action(action),
+    })
+}
+
+/// `entry` with a check mark while `on`.
+pub fn checked(entry: Entry, on: bool) -> Entry {
+    match entry {
+        Entry::Item(mut i) => {
+            i.checked = on;
+            Entry::Item(i)
+        }
+        other => other,
+    }
+}
+
+/// An entry that runs `f` (see `Target::Run`).
+pub fn run_entry(
+    label: impl Into<SharedString>,
+    shortcut: impl Into<SharedString>,
+    f: impl Fn(&mut Window, &mut App) + 'static,
+) -> Entry {
+    Entry::Item(Item {
+        label: label.into(),
+        detail: SharedString::default(),
+        shortcut: shortcut.into(),
+        enabled: true,
+        checked: false,
+        target: Target::Run(Rc::new(f)),
+    })
+}
+
 /// Builds the menus from the catalog, the live keymap and the settings.
-pub fn build(ready: bool, view: ViewState, dbs: &[DbEntry], cx: &App) -> Vec<Menu> {
-    let cmd = |name: &str, label: Option<&str>| -> Entry {
-        let c =
-            actions::find(name).unwrap_or_else(|| panic!("menu refers to unknown command {name}"));
-        let action = (c.make)();
-        Entry::Item(Item {
-            label: label.unwrap_or(c.label).to_owned().into(),
-            detail: SharedString::default(),
-            shortcut: actions::shortcut_text(&*action, cx).into(),
-            enabled: ready || !c.needs_db,
-            checked: false,
-            target: Target::Action(action),
-        })
-    };
+pub fn build(
+    ready: bool,
+    view: ViewState,
+    dbs: &[DbEntry],
+    ops: &crate::operands::Ops,
+    cx: &App,
+) -> Vec<Menu> {
+    let cmd = |name: &str, label: Option<&str>| -> Entry { command_entry(name, label, ready, cx) };
     macro_rules! c {
         ($a:ident) => {
             cmd(<actions::$a as Action>::name_for_type(), None)
@@ -352,22 +395,39 @@ pub fn build(ready: bool, view: ViewState, dbs: &[DbEntry], cx: &App) -> Vec<Men
                 c!(Undo, "&Undo"),
                 c!(Redo, "&Redo"),
                 Entry::Sep,
+                c!(Copy, "Cop&y"),
+                c!(CopyWithAddresses, "Copy &with addresses"),
                 c!(CopyAddress, "Copy current &address"),
                 Entry::Sep,
                 c!(Rename, "Re&name"),
-                c!(Comment, "&Comment"),
+                c!(Comment, "Co&mment"),
                 c!(RepeatableComment, "Re&peatable comment"),
                 c!(SetType, "Set &type"),
                 Entry::Sep,
-                c!(MakeCode, "Make c&ode"),
+                c!(MakeCode, "Make &code"),
                 c!(MakeData, "Make &data"),
                 c!(MakeString, "Make &string"),
                 c!(Undefine, "Unde&fine"),
                 Entry::Sep,
+                Entry::Sub {
+                    label: "&Operand types".into(),
+                    enabled: ready,
+                    entries: crate::context_menu::operand_entries(ops, cx),
+                },
+                c!(DefineArray),
+                c!(SetStringType, "Strin&g type…"),
+                Entry::Sep,
                 c!(MakeFunction, "Cr&eate function"),
                 c!(DeleteFunction, "De&lete function"),
+                c!(EditFunctionProps),
                 Entry::Sep,
                 c!(ToggleCollapse, "E&xpand / collapse"),
+                Entry::Sep,
+                Entry::Sub {
+                    label: "Patc&h program".into(),
+                    enabled: ready,
+                    entries: crate::context_menu::patch_entries(cx),
+                },
                 Entry::Sep,
                 Entry::Sub {
                     label: "Plug&ins".into(),
@@ -593,7 +653,20 @@ pub struct MenuBar {
     long_scroll: [ScrollHandle; 3],
     focus: FocusHandle,
     return_focus: Option<FocusHandle>,
+    /// A context menu: the same dropdown machinery, opened at a window
+    /// position instead of under a title.
+    popup: Option<Popup>,
+    /// The caret's operand, for the check marks of Edit > Operand.
+    pub ops: crate::operands::Ops,
     _sub: Subscription,
+}
+
+/// A context menu (see `MenuBar::open_popup`).
+struct Popup {
+    pos: Point<Pixels>,
+    entries: Vec<Entry>,
+    /// Submenus open to the left: the menu is near the right edge.
+    sub_left: bool,
 }
 
 impl EventEmitter<MenuEvent> for MenuBar {}
@@ -603,8 +676,9 @@ impl MenuBar {
         let focus = cx.focus_handle();
         // Focus moving elsewhere (a dialog opening, say) closes the menu.
         let sub = cx.on_focus_out(&focus, window, |this, _, _, cx| {
-            if this.open.is_some() {
+            if this.open.is_some() || this.popup.is_some() {
                 this.open = None;
+                this.popup = None;
                 this.dropped = false;
                 this.path.clear();
                 this.return_focus = None;
@@ -622,16 +696,53 @@ impl MenuBar {
             long_scroll: Default::default(),
             focus,
             return_focus: None,
+            popup: None,
+            ops: Default::default(),
             _sub: sub,
         }
     }
 
     pub fn is_open(&self) -> bool {
-        self.open.is_some()
+        self.open.is_some() || self.popup.is_some()
+    }
+
+    /// Opens a context menu at `pos` (window coordinates). The first entry is
+    /// highlighted when `keyboard`; `title` heads the list.
+    pub fn open_popup(
+        &mut self,
+        pos: Point<Pixels>,
+        title: impl Into<SharedString>,
+        mut entries: Vec<Entry>,
+        keyboard: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_open() {
+            self.return_focus = window.focused(cx);
+        }
+        let title: SharedString = title.into();
+        if !title.is_empty() {
+            entries.insert(0, Entry::Header(title));
+            entries.insert(1, Entry::Sep);
+        }
+        self.open = None;
+        self.dropped = true;
+        self.path.clear();
+        let sub_left = f32::from(pos.x) > f32::from(window.viewport_size().width) - 560.;
+        self.popup = Some(Popup {
+            pos,
+            entries,
+            sub_left,
+        });
+        if keyboard {
+            self.path.extend(self.step_from(0, None, 1));
+        }
+        window.focus(&self.focus, cx);
+        cx.notify();
     }
 
     fn refresh(&mut self, cx: &App) {
-        self.menus = build(self.ready, self.view, &self.dbs, cx);
+        self.menus = build(self.ready, self.view, &self.dbs, &self.ops, cx);
     }
 
     /// Opens menu `ix`; `keyboard` highlights its first entry.
@@ -643,9 +754,10 @@ impl MenuBar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.open.is_none() {
+        if !self.is_open() {
             self.return_focus = window.focused(cx);
         }
+        self.popup = None;
         self.refresh(cx);
         self.open = Some(ix);
         self.dropped = dropped;
@@ -671,10 +783,11 @@ impl MenuBar {
     }
 
     pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.open.is_none() {
+        if !self.is_open() {
             return;
         }
         self.open = None;
+        self.popup = None;
         self.dropped = false;
         self.path.clear();
         if let Some(f) = self.return_focus.take() {
@@ -684,7 +797,10 @@ impl MenuBar {
     }
 
     fn entries_at(&self, level: usize) -> Option<&[Entry]> {
-        let mut entries = self.menus.get(self.open?)?.entries.as_slice();
+        let mut entries = match &self.popup {
+            Some(p) => p.entries.as_slice(),
+            None => self.menus.get(self.open?)?.entries.as_slice(),
+        };
         for &ix in self.path.iter().take(level) {
             match entries.get(ix)? {
                 Entry::Sub { entries: sub, .. } => entries = sub,
@@ -872,6 +988,7 @@ impl MenuBar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        let sub_left = self.popup.as_ref().is_some_and(|p| p.sub_left);
         let hi = self.path.get(level).copied();
         let marks = mnemonics(entries);
         let t = *theme;
@@ -907,6 +1024,23 @@ impl MenuBar {
                         .h(px(1.))
                         .my(px(4.))
                         .bg(hsla(t.border))
+                        .into_any_element(),
+                    Entry::Header(text) => div()
+                        .h(px(ROW_HEIGHT))
+                        .px(px(8.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .text_size(px(11.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(hsla(t.muted))
+                        .child(div().w(px(16.)).flex_none())
+                        .child(
+                            div()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(text.clone()),
+                        )
                         .into_any_element(),
                     Entry::Item(item) => {
                         let item = item.clone();
@@ -997,15 +1131,22 @@ impl MenuBar {
                             .child(div().w(px(24.)).flex_none())
                             .child(icon("chevron-right", 12., hsla(t.muted)))
                             .when_some(sub, |d, sub| {
-                                d.child(deferred(
+                                d.child(deferred(if sub_left {
+                                    div()
+                                        .absolute()
+                                        .top(px(-5.))
+                                        .right(relative(1.))
+                                        .mr(px(-4.))
+                                        .child(sub)
+                                } else {
                                     div()
                                         .absolute()
                                         .top(px(-5.))
                                         .left(relative(1.))
                                         .pl(px(0.))
                                         .ml(px(-4.))
-                                        .child(sub),
-                                ))
+                                        .child(sub)
+                                }))
                             })
                             .into_any_element()
                     }
@@ -1038,6 +1179,14 @@ impl Render for MenuBar {
         self.refresh(cx);
         let open = self.open;
         let dropped = self.dropped;
+        let popup = self.popup.as_ref().map(|p| (p.pos, p.entries.clone()));
+        let popup = popup.map(|(pos, entries)| {
+            deferred(
+                anchored()
+                    .position(pos)
+                    .child(self.render_entries(&entries, 0, &theme, window, cx)),
+            )
+        });
         let titles: Vec<_> = self
             .menus
             .iter()
@@ -1102,7 +1251,9 @@ impl Render for MenuBar {
             .h_full()
             .flex()
             .items_center()
-            .when(open.is_some(), |d| d.key_context("MenuBar"))
+            .when(open.is_some() || popup.is_some(), |d| {
+                d.key_context("MenuBar")
+            })
             .track_focus(&self.focus)
             .on_action(cx.listener(|m, _: &SelectNext, window, cx| m.select(1, window, cx)))
             .on_action(cx.listener(|m, _: &SelectPrev, window, cx| m.select(-1, window, cx)))
@@ -1114,6 +1265,7 @@ impl Render for MenuBar {
                 cx.listener(|m, ev: &KeyDownEvent, window, cx| m.on_letter(ev, window, cx)),
             )
             .children(titles)
+            .children(popup)
     }
 }
 

@@ -455,6 +455,36 @@ impl Sidebar {
         cx.notify();
     }
 
+    /// Right click (or the Menu key) on row `ix`.
+    fn context_menu(&mut self, ix: usize, pos: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        let Some(&i) = self.filtered.get(ix) else {
+            return;
+        };
+        self.selected = ix;
+        let item = self.items[i].clone();
+        let entries = if let Some(ea) = item.ea {
+            crate::context_menu::address_row(&self.session, ea, Some(item.label.to_string()), cx)
+        } else if let Some(key) = item.doc {
+            let session = self.session.clone();
+            vec![crate::menubar::run_entry("Open", "", move |_, cx| {
+                session.update(cx, |_, cx| {
+                    cx.emit(crate::session::SessionEvent::OpenDoc(key.clone()))
+                })
+            })]
+        } else {
+            return;
+        };
+        crate::context_menu::show(
+            &self.session,
+            pos,
+            item.label.to_string(),
+            entries,
+            false,
+            cx,
+        );
+        cx.notify();
+    }
+
     fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
         if self.filtered.is_empty() {
             return;
@@ -513,6 +543,12 @@ impl Render for Sidebar {
                         })
                         .when(!on, |d| d.hover(|d| d.bg(hsla(theme.hover))))
                         .when_some(it.mangled.clone(), |d, m| d.tooltip(ui::tip(m, None)))
+                        .on_mouse_down(gpui::MouseButton::Right, {
+                            let entity = entity.clone();
+                            move |ev, _, cx| {
+                                entity.update(cx, |v, cx| v.context_menu(ix, ev.position, cx))
+                            }
+                        })
                         .on_click(move |ev, _, cx| {
                             entity.update(cx, |v, cx| {
                                 // Types open an editor: that takes a double click.
@@ -557,6 +593,12 @@ impl Render for Sidebar {
         div()
             .key_context("List")
             .track_focus(&self.focus)
+            .on_action(
+                cx.listener(|v, _: &crate::actions::ShowContextMenu, window, cx| {
+                    let pos = window.mouse_position();
+                    v.context_menu(v.selected, pos, cx)
+                }),
+            )
             .on_action(cx.listener(|v, _: &SelectPrev, _, cx| v.step(-1, cx)))
             .on_action(cx.listener(|v, _: &SelectNext, _, cx| v.step(1, cx)))
             .on_action(cx.listener(|v, _: &Confirm, _, cx| {

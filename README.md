@@ -90,6 +90,10 @@ The defaults follow IDA's `cfg/idagui.cfg` where IDA has a key. Every key is edi
 | Functions / Names / Strings / Segments | `Shift+F3` / `Shift+F4` / `Shift+F12` / `Shift+F7` | same (side panel tabs) |
 | Local types / Signatures | `Shift+F1` / `Shift+F5` | same |
 | Code / data / string / undefine / function | `C` `D` `A` `U` `P` | same |
+| Operand: hex/decimal, char, binary, offset, struct offset, enum, stack variable | `H` `R` `B` `O` `T` `M` `K` | same (negate `_`, bitwise not `~`; all under `Edit > Operand types`) |
+| Array / string type / edit function | `*` / `Alt+A` / `Alt+P` | same |
+| Select lines, copy | `Shift+arrows`, `Ctrl+C` | `Shift+arrows`, `Shift+click`, drag, `Ctrl+C` (`Esc` clears; with no selection `Esc` is back) |
+| Context menu | right click | right click, `Menu` key or `Ctrl+Alt+M` at the caret |
 | Save database | `Ctrl+W` | `Ctrl+W` (`Ctrl+S` too); close database is `Ctrl+Shift+W` |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Shift+Z` | same (`Ctrl+Y` too) |
 | Debugger | `F9` `F7` `F8` `F2` `Ctrl+F2` `F4` | same |
@@ -185,7 +189,7 @@ and editor once), `Toolbars and panels` and `Graph`; **Windows** holds the
 database tabs, `Close editor tab` and `Reset layout` (panel sizes, visibility
 and the split back to their defaults); **Jump** and **Search** carry the
 choosers and searches above. Underlined letters are menu mnemonics (a label can
-mark its own with `&` in `menubar.rs`). `Help` has `Documentation` and
+mark its own with `&` in `menubar.rs`). `Edit` also has `Operand types` (the current representation is checked), `Array…`, `String type…`, `Edit function…` and `Patch program` (change bytes, assemble, revert patches, the list of patched bytes, and `Apply patches to input file…`, which writes a copy named `<input>.patched` by default and never overwrites the input). `Help` has `Documentation` and
 `Report an issue` (they open the GitHub pages in your browser), `Coming from
 IDA`, the shortcut list and `About`.
 
@@ -226,6 +230,13 @@ IDA's defaults are used where IDA has one.
 | `-` | Expand or collapse a function or hidden range |
 | `Ctrl+W` (or `Ctrl+S`), `Ctrl+Z`, `Ctrl+Y` | Save, undo, redo |
 | `Ctrl+Shift+W` | Close the database |
+| `Shift+Up/Down/PgUp/PgDn/Home/End`, `Shift+click`, drag | Select lines (listing, graph block, pseudocode) or bytes (hex); `Esc` clears the selection |
+| `Ctrl+C` | Copy the selected lines, or the current one (hex: the bytes as `48 8B C4`); `Edit > Copy with addresses` keeps the address prefix, the hex view also copies as a C array or Python bytes, and `Ctrl+Shift+C` copies the address |
+| Right click, `Menu` key or `Ctrl+Alt+M` (`Shift+F10` stays IDA's Enums) | Context menu of the line, token, byte or list row under the caret (the same commands as the menu bar, with their shortcuts) |
+| `H` / `R` / `B` / `O` | Operand: hex or decimal / character / binary / offset |
+| `T` / `M` / `K` | Operand: structure offset / enum member / stack variable (choosers) |
+| `_` / `~` | Operand: negate / bitwise not |
+| `*` / `Alt+A` / `Alt+P` | Array dialog / string type chooser / edit function dialog |
 | `Ctrl+Shift+B` | Filter the side panel |
 | `Shift+F1` / `Shift+F9` / `Shift+F10` | Local types editor / pick a structure / pick an enum |
 | `Ctrl+X` / `Ctrl+J` | Xrefs to / from (IDA's keys; `X`, `Shift+X` also work) |

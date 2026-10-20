@@ -6,11 +6,12 @@ use crate::addr_map::SegMap;
 use crate::code::{self, HitMap, line_height};
 use crate::commands::{self, EditKind};
 use crate::scrollbar::{self, Axes, Axis, Metrics, Source};
+use crate::selection::{Anchor, CopyLine, lines_text};
 use crate::session::{Caret, Origin, Session, SessionEvent};
 use crate::theme::{Theme, hsla};
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, ScrollWheelEvent,
-    SharedString, Subscription, Window, canvas, div, point, prelude::*, px,
+    App, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, MouseMoveEvent,
+    ScrollWheelEvent, SharedString, Subscription, Window, canvas, div, point, prelude::*, px,
 };
 use ida_proto::tags::{self, Line};
 use ida_proto::{Ea, ListingChunk, ListingDown, ListingUp, Segments};
@@ -71,6 +72,12 @@ pub struct ListingView {
     /// Painted sizes: the text area's width and the widest visible line.
     text_w: f32,
     content_w: f32,
+    /// The other end of the selection (the caret row is this end).
+    sel: Anchor,
+    /// The row a mouse drag started on while the button is held.
+    drag_from: Option<usize>,
+    /// The caret column to keep when a refresh after an edit reloads the rows.
+    keep_col: Option<usize>,
     _subs: Vec<Subscription>,
 }
 
@@ -115,6 +122,9 @@ impl ListingView {
             owed_rows: 0,
             text_w: 0.,
             content_w: 0.,
+            sel: Anchor::default(),
+            drag_from: None,
+            keep_col: None,
             _subs: vec![sub],
         }
     }
@@ -284,6 +294,7 @@ impl ListingView {
 
     fn jump(&mut self, ea: Ea, keep_screen_row: Option<f32>, cx: &mut Context<Self>) {
         self.owed_rows = 0;
+        self.sel.clear();
         self.generation += 1;
         let generation = self.generation;
         let s = self.session.read(cx);
@@ -332,7 +343,7 @@ impl ListingView {
                             }
                         }
                         v.ensure_buffer(cx);
-                        v.caret_col = 0;
+                        v.caret_col = v.keep_col.take().unwrap_or(0);
                         v.publish_caret(cx);
                     }
                     (Err(e), _) | (_, Err(e)) => {
@@ -349,6 +360,8 @@ impl ListingView {
     fn refresh(&mut self, cx: &mut Context<Self>) {
         if let Some(ea) = self.cursor_ea() {
             let offset = self.cursor as f32 - self.top;
+            // An edit keeps the caret where it was (several operand commands in a row).
+            self.keep_col = Some(self.caret_col);
             self.jump(ea, Some(offset), cx);
         }
     }
@@ -390,6 +403,7 @@ impl ListingView {
                         v.rows.splice(0..0, new);
                         v.top += n as f32;
                         v.cursor += n;
+                        v.sel.shift(n as isize);
                         v.trim();
                         v.apply_owed(cx);
                         cx.notify();
@@ -460,6 +474,7 @@ impl ListingView {
             self.rows.drain(..cut);
             self.top -= cut as f32;
             self.cursor = self.cursor.saturating_sub(cut);
+            self.sel.shift(-(cut as isize));
             self.at_start = false;
         } else {
             let mut cut = (self.top as usize + self.viewport_rows + 200).max(MAX_ROWS / 2);
@@ -477,6 +492,21 @@ impl ListingView {
     }
 
     fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        self.sel.clear();
+        self.step(delta, cx);
+    }
+
+    /// Shift+arrow, Shift+PageUp / PageDown / Home / End: moves the caret end
+    /// of the selection.
+    fn extend(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.rows.is_empty() {
+            return;
+        }
+        self.sel.begin(self.cursor);
+        self.step(delta, cx);
+    }
+
+    fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
         if self.rows.is_empty() {
             return;
         }
@@ -500,7 +530,7 @@ impl ListingView {
     fn apply_owed(&mut self, cx: &mut Context<Self>) {
         let owed = std::mem::take(&mut self.owed_rows);
         if owed != 0 {
-            self.move_cursor(owed, cx);
+            self.step(owed, cx);
         }
     }
 
@@ -511,6 +541,10 @@ impl ListingView {
             col: self.caret_col as u32 + 1,
             block: None,
             token: self.token(),
+            operand: self
+                .rows
+                .get(self.cursor)
+                .and_then(|r| crate::operands::operand_at(&r.line.text, self.caret_col)),
         };
         self.session.update(cx, |s, cx| s.set_caret(caret, cx));
     }
@@ -549,6 +583,12 @@ impl ListingView {
         let Some((row, col)) = self.hit.hit(ev.position) else {
             return;
         };
+        if ev.modifiers.shift {
+            self.sel.begin(self.cursor);
+        } else {
+            self.sel.clear();
+            self.drag_from = Some(row);
+        }
         self.cursor = row;
         self.caret_col = col;
         self.highlight = self.token().map(Into::into);
@@ -557,6 +597,119 @@ impl ListingView {
             self.follow(cx);
         }
         cx.notify();
+    }
+
+    /// Where a keyboard-opened context menu appears: just under the caret.
+    fn caret_position(&self) -> gpui::Point<gpui::Pixels> {
+        match self.hit.rows.iter().find(|(r, _, _)| *r == self.cursor) {
+            Some((_, y, shaped)) => point(
+                self.hit.text_x + shaped.x_for_index(self.caret_col),
+                *y + px(line_height()),
+            ),
+            None => point(px(200.), px(200.)),
+        }
+    }
+
+    fn open_context_menu(
+        &mut self,
+        pos: gpui::Point<gpui::Pixels>,
+        keyboard: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ea) = self.cursor_ea() else { return };
+        let title = self.token().unwrap_or_else(|| format!("{ea:X}"));
+        let entries = crate::context_menu::listing(&self.session.read(cx).ops(), cx);
+        crate::context_menu::show(&self.session, pos, title, entries, keyboard, cx);
+    }
+
+    /// Right click: the caret goes to the clicked token first (unless it is
+    /// inside the selection), then the menu opens.
+    fn on_right_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        if let Some((row, col)) = self.hit.hit(ev.position) {
+            let inside = self
+                .sel
+                .range(self.cursor)
+                .is_some_and(|r| r.contains(&row));
+            if !inside {
+                self.sel.clear();
+                self.cursor = row;
+                self.caret_col = col;
+                self.highlight = self.token().map(Into::into);
+                self.publish_cursor(cx);
+            }
+        }
+        self.open_context_menu(ev.position, false, cx);
+        cx.notify();
+    }
+
+    /// Dragging with the left button held selects from the row it started on.
+    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(from) = self.drag_from else { return };
+        if ev.pressed_button != Some(MouseButton::Left) {
+            self.drag_from = None;
+            return;
+        }
+        let Some((row, col)) = self.hit.hit(ev.position) else {
+            return;
+        };
+        if row != self.cursor {
+            self.sel.begin(from);
+            self.cursor = row;
+            self.caret_col = col;
+            self.publish_cursor(cx);
+            cx.notify();
+        }
+    }
+
+    /// The bytes of the selected lines, or of the item at the caret: from the
+    /// first line's address to the next address after the last line.
+    pub fn selection_span(&self) -> Option<(Ea, u64)> {
+        let range = self
+            .sel
+            .range(self.cursor)
+            .unwrap_or(self.cursor..=self.cursor);
+        let first = self.rows.get(*range.start())?.ea;
+        let last = self.rows.get(*range.end())?.ea;
+        let end = self.rows[*range.end()..]
+            .iter()
+            .map(|r| r.ea)
+            .find(|&ea| ea > last)
+            .unwrap_or(last + 1);
+        Some((first, end - first))
+    }
+
+    /// Esc: with a selection it only clears the selection; otherwise it is
+    /// "back" as everywhere (the action keeps travelling up).
+    fn on_back(&mut self, cx: &mut Context<Self>) {
+        if self.sel.active(self.cursor) {
+            self.sel.clear();
+            cx.notify();
+        } else {
+            cx.propagate();
+        }
+    }
+
+    /// Ctrl+C: the selected lines, or the current one.
+    fn copy(&mut self, with_addresses: bool, cx: &mut Context<Self>) {
+        let range = self
+            .sel
+            .range(self.cursor)
+            .unwrap_or(self.cursor..=self.cursor);
+        let Some(rows) = self
+            .rows
+            .get(*range.start()..=(*range.end()).min(self.rows.len() - 1))
+        else {
+            return;
+        };
+        let lines: Vec<CopyLine> = rows
+            .iter()
+            .map(|r| CopyLine {
+                addr: Some(&r.prefix),
+                text: &r.line.text,
+            })
+            .collect();
+        zui_editor::clipboard::write(lines_text(&lines, with_addresses), cx);
     }
 
     fn follow(&mut self, cx: &mut Context<Self>) {
@@ -594,6 +747,7 @@ impl ListingView {
                 let visible = (f32::from(bounds.size.height) / line_height()).ceil() as usize + 1;
                 let end = (first + visible).min(view.rows.len());
                 let cursor = view.cursor;
+                let selected = view.sel.range(cursor);
                 let highlight = view.highlight.clone();
                 // Several lines can share an address (a segment header sits on the
                 // first instruction); the markers belong to the last of them.
@@ -640,8 +794,12 @@ impl ListingView {
                             code::paint_row_bg(bounds, y, bg, window);
                         }
                         let marked = own && marks.row_bg(ea, &theme).is_some();
+                        let in_selection = selected.as_ref().is_some_and(|r| r.contains(&i));
+                        if in_selection && !marked {
+                            code::paint_row_bg(bounds, y, hsla(theme.selection), window);
+                        }
                         if i == cursor {
-                            if !marked {
+                            if !marked && !in_selection {
                                 code::paint_row_bg(bounds, y, hsla(theme.caret_row), window);
                             }
                             if focused {
@@ -653,7 +811,7 @@ impl ListingView {
                                     hsla(theme.accent),
                                 ));
                             }
-                        } else if same_item && !marked {
+                        } else if same_item && !marked && !in_selection {
                             code::paint_row_bg(bounds, y, hsla(theme.caret_row), window);
                         }
                         let shaped = code::shape(window, &line, &theme, highlight.as_deref());
@@ -733,6 +891,31 @@ impl Render for ListingView {
             .bg(hsla(theme.surface))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
+            .on_action(cx.listener(|v, _: &ShowContextMenu, _, cx| {
+                let pos = v.caret_position();
+                v.open_context_menu(pos, true, cx)
+            }))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|v, _, _, _| v.drag_from = None),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|v, _, _, _| v.drag_from = None),
+            )
+            .on_action(cx.listener(|v, _: &Back, _, cx| v.on_back(cx)))
+            .on_action(cx.listener(|v, _: &Copy, _, cx| v.copy(false, cx)))
+            .on_action(cx.listener(|v, _: &CopyWithAddresses, _, cx| v.copy(true, cx)))
+            .on_action(cx.listener(|v, _: &ExtendUp, _, cx| v.extend(-1, cx)))
+            .on_action(cx.listener(|v, _: &ExtendDown, _, cx| v.extend(1, cx)))
+            .on_action(cx.listener(move |v, _: &ExtendPageUp, _, cx| v.extend(-page, cx)))
+            .on_action(cx.listener(move |v, _: &ExtendPageDown, _, cx| v.extend(page, cx)))
+            .on_action(cx.listener(|v, _: &ExtendHome, _, cx| v.extend(-(v.cursor as isize), cx)))
+            .on_action(cx.listener(|v, _: &ExtendEnd, _, cx| {
+                v.extend(v.rows.len() as isize - 1 - v.cursor as isize, cx)
+            }))
             .on_action(cx.listener(|v, _: &CursorUp, _, cx| v.move_cursor(-1, cx)))
             .on_action(cx.listener(|v, _: &CursorDown, _, cx| v.move_cursor(1, cx)))
             .on_action(cx.listener(move |v, _: &PageUp, _, cx| v.move_cursor(-page, cx)))

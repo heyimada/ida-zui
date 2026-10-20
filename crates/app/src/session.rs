@@ -40,9 +40,22 @@ pub struct Caret {
     pub block: Option<usize>,
     /// The name or identifier under the caret.
     pub token: Option<String>,
+    /// The 0-based operand of the instruction under the caret (listing and
+    /// graph), for Edit > Operand.
+    pub operand: Option<u32>,
+}
+
+/// A view asks for a context menu (see `context_menu.rs`).
+pub struct ContextMenuRequest {
+    pub pos: gpui::Point<gpui::Pixels>,
+    pub title: SharedString,
+    pub entries: Vec<crate::menubar::Entry>,
+    /// Opened from the keyboard: highlight the first entry.
+    pub keyboard: bool,
 }
 
 pub enum SessionEvent {
+    ContextMenu(ContextMenuRequest),
     /// The caret moved within a view (or onto another token).
     CaretChanged,
     Opened,
@@ -119,6 +132,9 @@ pub struct Session {
     pub revision: u64,
     pub log: Vec<SharedString>,
     pub status: StatusLine,
+    /// How each operand of the item at the cursor is shown (check marks of
+    /// Edit > Operand); refreshed by `Focus` after the caret settles.
+    pub op_repr: Vec<ida_proto::OpReprRow>,
     /// Function and name lists, shared by the side panel and jump-anywhere.
     pub functions: Rc<Vec<ida_proto::FuncRow>>,
     pub names: Rc<Vec<ida_proto::NameRow>>,
@@ -158,6 +174,7 @@ impl Session {
             revision: 0,
             log: Vec::new(),
             status: StatusLine::default(),
+            op_repr: Vec::new(),
             functions: Rc::default(),
             names: Rc::default(),
             analysis: None,
@@ -505,6 +522,14 @@ impl Session {
             .ok();
         })
         .detach();
+    }
+
+    /// The operand under the caret and how the instruction's operands look.
+    pub fn ops(&self) -> crate::operands::Ops {
+        crate::operands::Ops {
+            rows: self.op_repr.clone(),
+            op: self.caret.operand.unwrap_or(0),
+        }
     }
 
     pub fn error(&mut self, msg: impl Into<SharedString>, cx: &mut Context<Self>) {

@@ -5,11 +5,12 @@ use crate::actions::*;
 use crate::code::{self, HitMap, line_height};
 use crate::commands;
 use crate::scrollbar::{self, Axes, Axis, Metrics, Source};
+use crate::selection::{Anchor, CopyLine, lines_text};
 use crate::session::{Caret, Origin, Session, SessionEvent};
 use crate::theme::{Theme, hsla};
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, ScrollWheelEvent,
-    SharedString, Subscription, Window, canvas, div, point, prelude::*, px,
+    App, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, MouseMoveEvent,
+    ScrollWheelEvent, SharedString, Subscription, Window, canvas, div, point, prelude::*, px,
 };
 use ida_proto::tags::{self, Line};
 use ida_proto::{Decompile, Ea, ItemInfo, PseudoItem, RenameLvar, SetLvarType};
@@ -38,6 +39,10 @@ pub struct PseudoView {
     /// Only decompile while visible; remember what to show when shown.
     pub visible: bool,
     wanted: Option<Ea>,
+    /// The other end of the selection (the caret line is this end).
+    sel: Anchor,
+    /// The line a mouse drag started on while the button is held.
+    drag_from: Option<usize>,
     _subs: Vec<Subscription>,
 }
 
@@ -83,6 +88,8 @@ impl PseudoView {
             hit: HitMap::default(),
             visible: false,
             wanted: None,
+            sel: Anchor::default(),
+            drag_from: None,
             _subs: vec![sub],
         }
     }
@@ -138,6 +145,7 @@ impl PseudoView {
                         if !keep_scroll {
                             v.top = 0.;
                             v.cursor = 0;
+                            v.sel.clear();
                         }
                         v.cursor = v.cursor.min(v.lines.len().saturating_sub(1));
                     }
@@ -197,6 +205,7 @@ impl PseudoView {
             col: self.caret_col as u32 + 1,
             block: None,
             token,
+            operand: None,
         };
         self.session.update(cx, |s, cx| s.set_caret(caret, cx));
     }
@@ -271,6 +280,21 @@ impl PseudoView {
     }
 
     fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        self.sel.clear();
+        self.step(delta, cx);
+    }
+
+    /// Shift+arrow, Shift+PageUp / PageDown / Home / End: moves the caret end
+    /// of the selection.
+    fn extend(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.lines.is_empty() {
+            return;
+        }
+        self.sel.begin(self.cursor);
+        self.step(delta, cx);
+    }
+
+    fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
         if self.lines.is_empty() {
             return;
         }
@@ -318,6 +342,12 @@ impl PseudoView {
         let Some((row, col)) = self.hit.hit(ev.position) else {
             return;
         };
+        if ev.modifiers.shift {
+            self.sel.begin(self.cursor);
+        } else {
+            self.sel.clear();
+            self.drag_from = Some(row);
+        }
         self.cursor = row;
         self.caret_col = col;
         self.highlight = self.lines.get(row).and_then(|l| {
@@ -330,6 +360,115 @@ impl PseudoView {
             self.sync_cursor(cx);
         }
         cx.notify();
+    }
+
+    /// Where a keyboard-opened context menu appears: just under the caret.
+    fn caret_position(&self) -> gpui::Point<gpui::Pixels> {
+        match self.hit.rows.iter().find(|(r, _, _)| *r == self.cursor) {
+            Some((_, y, shaped)) => point(
+                self.hit.text_x + shaped.x_for_index(self.caret_col),
+                *y + px(line_height()),
+            ),
+            None => point(px(200.), px(200.)),
+        }
+    }
+
+    fn open_context_menu(
+        &mut self,
+        pos: gpui::Point<gpui::Pixels>,
+        keyboard: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let title = self
+            .lines
+            .get(self.cursor)
+            .and_then(|l| l.word_at(self.caret_col).map(|r| l.text[r].to_owned()))
+            .unwrap_or_else(|| self.name.to_string());
+        let entries = crate::context_menu::pseudocode(cx);
+        crate::context_menu::show(&self.session, pos, title, entries, keyboard, cx);
+    }
+
+    /// Right click: the caret goes to the clicked token first (unless it is
+    /// inside the selection), then the menu opens.
+    fn on_right_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        if let Some((row, col)) = self.hit.hit(ev.position) {
+            let inside = self
+                .sel
+                .range(self.cursor)
+                .is_some_and(|r| r.contains(&row));
+            if !inside {
+                self.sel.clear();
+                self.cursor = row;
+                self.caret_col = col;
+                self.highlight = self.lines.get(row).and_then(|l| {
+                    l.word_at(col)
+                        .map(|r| SharedString::from(l.text[r].to_owned()))
+                });
+                self.sync_cursor(cx);
+            }
+        }
+        self.open_context_menu(ev.position, false, cx);
+        cx.notify();
+    }
+
+    /// Dragging with the left button held selects from the line it started on.
+    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(from) = self.drag_from else { return };
+        if ev.pressed_button != Some(MouseButton::Left) {
+            self.drag_from = None;
+            return;
+        }
+        let Some((row, col)) = self.hit.hit(ev.position) else {
+            return;
+        };
+        if row != self.cursor {
+            self.sel.begin(from);
+            self.cursor = row;
+            self.caret_col = col;
+            self.sync_cursor(cx);
+            cx.notify();
+        }
+    }
+
+    /// Esc: with a selection it only clears the selection; otherwise it is
+    /// "back" as everywhere (the action keeps travelling up).
+    fn on_back(&mut self, cx: &mut Context<Self>) {
+        if self.sel.active(self.cursor) {
+            self.sel.clear();
+            cx.notify();
+        } else {
+            cx.propagate();
+        }
+    }
+
+    /// Ctrl+C: the selected lines, or the current one. "With addresses" puts
+    /// the address of the line's first ctree item in front.
+    fn copy(&mut self, with_addresses: bool, cx: &mut Context<Self>) {
+        if self.lines.is_empty() {
+            return;
+        }
+        let range = self
+            .sel
+            .range(self.cursor)
+            .unwrap_or(self.cursor..=self.cursor);
+        let last = (*range.end()).min(self.lines.len() - 1);
+        let addrs: Vec<Option<String>> = (*range.start()..=last)
+            .map(|i| {
+                self.line_eas
+                    .get(i)
+                    .and_then(|eas| eas.first())
+                    .map(|ea| format!("{ea:X}"))
+            })
+            .collect();
+        let lines: Vec<CopyLine> = (*range.start()..=last)
+            .zip(&addrs)
+            .map(|(i, a)| CopyLine {
+                addr: a.as_deref(),
+                text: &self.lines[i].text,
+            })
+            .collect();
+        zui_editor::clipboard::write(lines_text(&lines, with_addresses), cx);
     }
 
     fn render_canvas(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -374,6 +513,7 @@ impl PseudoView {
                 };
                 let states: Vec<Option<bool>> = (first..end).map(line_state).collect();
                 let cursor = view.cursor;
+                let selected = view.sel.range(cursor);
                 let highlight = view.highlight.clone();
                 let focused = view.focus.is_focused(window);
                 let text_x = bounds.left() + px(64.) - px(view.scroll_x);
@@ -398,8 +538,12 @@ impl PseudoView {
                         } else if bpt == Some(true) {
                             code::paint_row_bg(bounds, y, hsla(theme.danger_soft), window);
                         }
+                        let in_selection = selected.as_ref().is_some_and(|r| r.contains(&i));
+                        if in_selection && !at_ip && bpt != Some(true) {
+                            code::paint_row_bg(bounds, y, hsla(theme.selection), window);
+                        }
                         if i == cursor {
-                            if !at_ip && bpt != Some(true) {
+                            if !at_ip && bpt != Some(true) && !in_selection {
                                 code::paint_row_bg(bounds, y, hsla(theme.caret_row), window);
                             }
                             if focused {
@@ -518,6 +662,31 @@ impl Render for PseudoView {
             .flex()
             .flex_col()
             .bg(hsla(theme.surface))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
+            .on_action(cx.listener(|v, _: &ShowContextMenu, _, cx| {
+                let pos = v.caret_position();
+                v.open_context_menu(pos, true, cx)
+            }))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|v, _, _, _| v.drag_from = None),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|v, _, _, _| v.drag_from = None),
+            )
+            .on_action(cx.listener(|v, _: &Back, _, cx| v.on_back(cx)))
+            .on_action(cx.listener(|v, _: &Copy, _, cx| v.copy(false, cx)))
+            .on_action(cx.listener(|v, _: &CopyWithAddresses, _, cx| v.copy(true, cx)))
+            .on_action(cx.listener(|v, _: &ExtendUp, _, cx| v.extend(-1, cx)))
+            .on_action(cx.listener(|v, _: &ExtendDown, _, cx| v.extend(1, cx)))
+            .on_action(cx.listener(move |v, _: &ExtendPageUp, _, cx| v.extend(-page, cx)))
+            .on_action(cx.listener(move |v, _: &ExtendPageDown, _, cx| v.extend(page, cx)))
+            .on_action(cx.listener(|v, _: &ExtendHome, _, cx| v.extend(-(v.cursor as isize), cx)))
+            .on_action(cx.listener(|v, _: &ExtendEnd, _, cx| {
+                v.extend(v.lines.len() as isize - 1 - v.cursor as isize, cx)
+            }))
             .on_action(cx.listener(|v, _: &CursorUp, _, cx| v.move_cursor(-1, cx)))
             .on_action(cx.listener(|v, _: &CursorDown, _, cx| v.move_cursor(1, cx)))
             .on_action(cx.listener(move |v, _: &PageUp, _, cx| v.move_cursor(-page, cx)))

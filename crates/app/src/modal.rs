@@ -19,6 +19,9 @@ pub enum ChoiceValue {
     Action(Box<dyn Action>),
     /// Open an editor tab.
     Doc(crate::docs::DocKey),
+    /// Run this with whatever it captured (a chooser whose rows do something
+    /// of their own, such as picking a structure for an operand).
+    Run(Rc<dyn Fn(&mut App)>),
 }
 
 impl Clone for ChoiceValue {
@@ -27,6 +30,7 @@ impl Clone for ChoiceValue {
             Self::Ea(e) => Self::Ea(*e),
             Self::Action(a) => Self::Action(a.boxed_clone()),
             Self::Doc(k) => Self::Doc(k.clone()),
+            Self::Run(f) => Self::Run(f.clone()),
         }
     }
 }

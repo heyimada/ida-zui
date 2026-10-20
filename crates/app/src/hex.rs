@@ -3,11 +3,13 @@
 use crate::actions::*;
 use crate::code::{self, line_height};
 use crate::scrollbar::{self, Axes, Axis, Metrics, Source};
+use crate::selection::{Anchor, BytesFormat, bytes_text};
 use crate::session::{Origin, Session, SessionEvent};
 use crate::theme::{Theme, hsla};
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent, Pixels,
-    ScrollWheelEvent, Subscription, Window, canvas, div, point, prelude::*, px,
+    App, Bounds, Context, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, Point, ScrollWheelEvent, Subscription, Window, canvas, div, point,
+    prelude::*, px,
 };
 use ida_proto::{ByteChunk, Bytes, DbgMemRead, Ea, SegRow, Segments};
 use std::collections::{HashMap, HashSet};
@@ -33,8 +35,15 @@ pub struct HexView {
     pub visible: bool,
     /// Show the suspended process's memory instead of the database's bytes.
     process: bool,
+    /// The other end of the byte selection (the caret is this end).
+    sel: Anchor,
+    /// The byte a mouse drag started on while the button is held.
+    drag_from: Option<Ea>,
     _subs: Vec<Subscription>,
 }
+
+/// Selections longer than this are not copied (the clipboard is not a file).
+const MAX_COPY: u64 = 1 << 20;
 
 impl HexView {
     pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
@@ -82,6 +91,8 @@ impl HexView {
             char_w: 7.8,
             visible: false,
             process: false,
+            sel: Anchor::default(),
+            drag_from: None,
             _subs: vec![sub],
         }
     }
@@ -224,6 +235,28 @@ impl HexView {
     }
 
     fn move_rows(&mut self, delta: i64, cx: &mut Context<Self>) {
+        self.sel.clear();
+        self.step_rows(delta, cx);
+    }
+
+    /// Shift+Up / Down / PageUp / PageDown: extends the selection by rows.
+    fn extend_rows(&mut self, delta: i64, cx: &mut Context<Self>) {
+        self.sel.begin(self.cursor as usize);
+        self.step_rows(delta, cx);
+    }
+
+    /// Shift+Home / End: to the start / end of the caret's row.
+    fn extend_row_edge(&mut self, end: bool, cx: &mut Context<Self>) {
+        self.sel.begin(self.cursor as usize);
+        let base = self.cursor & !(ROW - 1);
+        self.cursor = if end { base + ROW - 1 } else { base };
+        let ea = self.cursor;
+        self.session
+            .update(cx, |s, cx| s.set_cursor(ea, Origin::Hex, cx));
+        cx.notify();
+    }
+
+    fn step_rows(&mut self, delta: i64, cx: &mut Context<Self>) {
         let Some(row) = self.row_of(self.cursor) else {
             return;
         };
@@ -245,14 +278,14 @@ impl HexView {
         cx.notify();
     }
 
-    fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus, cx);
-        let Some(b) = self.bounds else { return };
-        let y = f32::from(ev.position.y - b.top());
+    /// The byte under `pos`, in the hex or the ASCII column.
+    fn byte_at(&self, pos: Point<Pixels>) -> Option<Ea> {
+        let b = self.bounds?;
+        let y = f32::from(pos.y - b.top());
         let row = (self.top.floor()
             + ((y + (self.top.fract() as f32) * line_height()) / line_height()).floor() as f64)
             as u64;
-        let x = f32::from(ev.position.x - b.left()) / self.char_w;
+        let x = f32::from(pos.x - b.left()) / self.char_w;
         // Layout in characters: 18 addr + 2 gap, then 16 x "XX " plus a gap after 8, then 2 + ascii.
         let hex0 = 20.;
         let col = if x >= hex0 && x < hex0 + 49. {
@@ -264,8 +297,19 @@ impl HexView {
         } else {
             None
         };
-        if let (Some(base), Some(col)) = (self.ea_of_row(row), col) {
-            self.cursor = base + col.min(15);
+        Some(self.ea_of_row(row)? + col?.min(15))
+    }
+
+    fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        if let Some(byte) = self.byte_at(ev.position) {
+            if ev.modifiers.shift {
+                self.sel.begin(self.cursor as usize);
+            } else {
+                self.sel.clear();
+                self.drag_from = Some(byte);
+            }
+            self.cursor = byte;
             let ea = self.cursor;
             if ev.click_count >= 2 {
                 self.session.update(cx, |s, cx| s.navigate(ea, cx));
@@ -274,6 +318,171 @@ impl HexView {
                     .update(cx, |s, cx| s.set_cursor(ea, Origin::Hex, cx));
             }
             cx.notify();
+        }
+    }
+
+    /// Where a keyboard-opened context menu appears: under the caret's row.
+    fn caret_position(&self) -> Point<Pixels> {
+        let (Some(b), Some(row)) = (self.bounds, self.row_of(self.cursor)) else {
+            return point(px(200.), px(200.));
+        };
+        let y = (row as f64 - self.top + 1.) as f32 * line_height();
+        let col = (self.cursor % ROW) as f32;
+        b.origin + point(px((20. + col * 3.) * self.char_w), px(y))
+    }
+
+    /// Right click: the caret goes to the clicked byte first (unless it is
+    /// inside the selection), then the menu opens.
+    fn on_right_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        if let Some(byte) = self.byte_at(ev.position) {
+            let inside = self
+                .sel
+                .range(self.cursor as usize)
+                .is_some_and(|r| r.contains(&(byte as usize)));
+            if !inside {
+                self.sel.clear();
+                self.cursor = byte;
+                self.session
+                    .update(cx, |s, cx| s.set_cursor(byte, Origin::Hex, cx));
+            }
+        }
+        self.open_context_menu(ev.position, false, cx);
+        cx.notify();
+    }
+
+    fn open_context_menu(&mut self, pos: Point<Pixels>, keyboard: bool, cx: &mut Context<Self>) {
+        let entries = crate::context_menu::hex(cx);
+        let title = format!("{:X}", self.cursor);
+        crate::context_menu::show(&self.session, pos, title, entries, keyboard, cx);
+    }
+
+    /// Dragging with the left button held selects from the byte it started on.
+    fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(from) = self.drag_from else { return };
+        if ev.pressed_button != Some(MouseButton::Left) {
+            self.drag_from = None;
+            return;
+        }
+        if let Some(byte) = self.byte_at(ev.position)
+            && byte != self.cursor
+        {
+            self.sel.begin(from as usize);
+            self.cursor = byte;
+            self.session
+                .update(cx, |s, cx| s.set_cursor(byte, Origin::Hex, cx));
+            cx.notify();
+        }
+    }
+
+    /// Esc: with a selection it only clears the selection; otherwise it is
+    /// "back" as everywhere (the action keeps travelling up).
+    fn on_back(&mut self, cx: &mut Context<Self>) {
+        if self.sel.active(self.cursor as usize) {
+            self.sel.clear();
+            cx.notify();
+        } else {
+            cx.propagate();
+        }
+    }
+
+    /// The selected bytes (start, length), or the one under the caret.
+    pub fn selection_span(&self) -> (Ea, u64) {
+        let (lo, hi) = self.selected_range();
+        (lo, hi - lo + 1)
+    }
+
+    /// The selected bytes, or the one under the caret.
+    fn selected_range(&self) -> (Ea, Ea) {
+        match self.sel.range(self.cursor as usize) {
+            Some(r) => (
+                *r.start() as Ea,
+                (*r.end() as Ea).min(*r.start() as Ea + MAX_COPY - 1),
+            ),
+            None => (self.cursor, self.cursor),
+        }
+    }
+
+    /// Copy / Copy as C array / Copy as Python bytes. Pages not loaded yet are
+    /// read first. With `dump`, plain Copy becomes "Copy with addresses": a
+    /// hex dump with the row address in front.
+    fn copy(&mut self, format: BytesFormat, dump: bool, cx: &mut Context<Self>) {
+        let (lo, hi) = self.selected_range();
+        let process = self.shows_process(cx);
+        let mut futs = Vec::new();
+        let mut page = lo & !(PAGE - 1);
+        while page <= hi {
+            if !self.pages.contains_key(&page) {
+                futs.push(self.read_page(page, process, cx));
+            }
+            page += PAGE;
+        }
+        let have: HashMap<Ea, ByteChunk> =
+            self.pages.iter().map(|(k, v)| (*k, v.clone())).collect();
+        cx.spawn(async move |_, cx| {
+            let mut pages = have;
+            for (page, chunk) in futures::future::join_all(futs).await.into_iter().flatten() {
+                pages.insert(page, chunk);
+            }
+            let bytes: Vec<u8> = (lo..=hi)
+                .map(|ea| {
+                    let page = ea & !(PAGE - 1);
+                    pages
+                        .get(&page)
+                        .and_then(|c| c.get((ea - page) as usize))
+                        .unwrap_or(0)
+                })
+                .collect();
+            let text = if dump {
+                bytes
+                    .chunks(ROW as usize)
+                    .enumerate()
+                    .map(|(i, row)| {
+                        format!(
+                            "{:016X}  {}",
+                            lo + i as u64 * ROW,
+                            bytes_text(row, BytesFormat::Hex)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                bytes_text(&bytes, format)
+            };
+            cx.update(|cx| zui_editor::clipboard::write(text, cx));
+        })
+        .detach();
+    }
+
+    /// One page of bytes, tagged with its address.
+    fn read_page(
+        &self,
+        page: Ea,
+        process: bool,
+        cx: &App,
+    ) -> futures::future::LocalBoxFuture<'static, Option<(Ea, ByteChunk)>> {
+        let s = self.session.read(cx);
+        if process {
+            let call = s.call(DbgMemRead {
+                ea: page,
+                len: PAGE as u32,
+            });
+            Box::pin(async move {
+                let m = call.await.ok()?;
+                Some((
+                    page,
+                    ByteChunk {
+                        ea: m.ea,
+                        hex: m.hex,
+                    },
+                ))
+            })
+        } else {
+            let call = s.call(Bytes {
+                ea: page,
+                len: PAGE as u32,
+            });
+            Box::pin(async move { Some((page, call.await.ok()?)) })
         }
     }
 
@@ -290,6 +499,7 @@ impl HexView {
                 let frac = (v.top - v.top.floor()) as f32;
                 let rows = (f32::from(bounds.size.height) / line_height()).ceil() as usize + 1;
                 let cursor = v.cursor;
+                let selected = v.sel.range(cursor as usize);
                 let mut lines = Vec::new();
                 for k in 0..rows {
                     let r = first + k as u64;
@@ -305,7 +515,29 @@ impl HexView {
                 window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
                     for (k, base, bytes) in lines {
                         let y = bounds.top() + px((k as f32 - frac) * line_height());
-                        if cursor >= base && cursor < base + ROW {
+                        // The selected bytes of this row: the hex cells and the ASCII.
+                        if let Some(sel) = &selected {
+                            let (lo, hi) = (*sel.start() as Ea, *sel.end() as Ea);
+                            if hi >= base && lo < base + ROW {
+                                let a = lo.max(base) - base;
+                                let b = hi.min(base + ROW - 1) - base;
+                                let hx =
+                                    |c: u64| 20. + c as f32 * 3. + if c >= 8 { 1. } else { 0. };
+                                for (x, w) in [
+                                    (hx(a), hx(b) + 2. - hx(a)),
+                                    (20. + 51. + a as f32, (b - a + 1) as f32),
+                                ] {
+                                    window.paint_quad(gpui::fill(
+                                        Bounds::new(
+                                            point(bounds.left() + cw * x, y),
+                                            gpui::size(cw * w, px(line_height())),
+                                        ),
+                                        hsla(theme.selection),
+                                    ));
+                                }
+                            }
+                        }
+                        if cursor >= base && cursor < base + ROW && selected.is_none() {
                             code::paint_row_bg(bounds, y, hsla(theme.caret_row), window);
                             let col = (cursor - base) as f32;
                             let hx = 20. + col * 3. + if col >= 8. { 1. } else { 0. };
@@ -440,6 +672,37 @@ impl Render for HexView {
             .bg(hsla(theme.surface))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
+            .on_action(cx.listener(|v, _: &ShowContextMenu, _, cx| {
+                let pos = v.caret_position();
+                v.open_context_menu(pos, true, cx)
+            }))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|v, _, _, _| v.drag_from = None),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|v, _, _, _| v.drag_from = None),
+            )
+            .on_action(cx.listener(|v, _: &Back, _, cx| v.on_back(cx)))
+            .on_action(cx.listener(|v, _: &Copy, _, cx| v.copy(BytesFormat::Hex, false, cx)))
+            .on_action(
+                cx.listener(|v, _: &CopyWithAddresses, _, cx| v.copy(BytesFormat::Hex, true, cx)),
+            )
+            .on_action(
+                cx.listener(|v, _: &CopyAsCArray, _, cx| v.copy(BytesFormat::CArray, false, cx)),
+            )
+            .on_action(
+                cx.listener(|v, _: &CopyAsPython, _, cx| v.copy(BytesFormat::Python, false, cx)),
+            )
+            .on_action(cx.listener(|v, _: &ExtendUp, _, cx| v.extend_rows(-1, cx)))
+            .on_action(cx.listener(|v, _: &ExtendDown, _, cx| v.extend_rows(1, cx)))
+            .on_action(cx.listener(move |v, _: &ExtendPageUp, _, cx| v.extend_rows(-page, cx)))
+            .on_action(cx.listener(move |v, _: &ExtendPageDown, _, cx| v.extend_rows(page, cx)))
+            .on_action(cx.listener(|v, _: &ExtendHome, _, cx| v.extend_row_edge(false, cx)))
+            .on_action(cx.listener(|v, _: &ExtendEnd, _, cx| v.extend_row_edge(true, cx)))
             .on_action(cx.listener(|v, _: &CursorUp, _, cx| v.move_rows(-1, cx)))
             .on_action(cx.listener(|v, _: &CursorDown, _, cx| v.move_rows(1, cx)))
             .on_action(cx.listener(move |v, _: &PageUp, _, cx| v.move_rows(-page, cx)))

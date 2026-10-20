@@ -6,6 +6,7 @@ use crate::commands::{self, EditKind};
 use crate::graph_layout::{self, Layout};
 use crate::graph_paint::{self, MINIMAP_GAP};
 use crate::scrollbar::{self, Axes};
+use crate::selection::{Anchor, CopyLine, lines_text};
 use crate::session::{Caret, Origin, Session, SessionEvent};
 use crate::theme::{Theme, hsla};
 use crate::ui;
@@ -133,6 +134,12 @@ pub struct GraphView {
     minimap: Option<(Bounds<Pixels>, f32)>,
     /// The minimap is drawn in the bottom-right corner of the canvas.
     show_minimap: bool,
+    /// A selection runs between this line and the caret line, inside the
+    /// block `sel_block` (a selection never spans blocks).
+    sel: Anchor,
+    sel_block: usize,
+    /// The (block, line) a mouse drag selection started on.
+    drag_sel: Option<(usize, usize)>,
     _subs: Vec<Subscription>,
 }
 
@@ -180,6 +187,9 @@ impl GraphView {
             wanted: None,
             minimap: None,
             show_minimap: true,
+            sel: Anchor::default(),
+            sel_block: 0,
+            drag_sel: None,
             _subs: vec![sub],
         }
     }
@@ -212,6 +222,7 @@ impl GraphView {
         };
         let grown = full.len() - b.lines.len();
         b.lines = full;
+        self.sel.clear();
         if let Some((cb, cl)) = &mut self.cursor
             && *cb == bi
             && *cl > chip
@@ -243,6 +254,7 @@ impl GraphView {
             Some(f) if Some(f) == self.func && !self.loading => {
                 self.unfold_for(ea);
                 if let Some(c) = self.locate(ea) {
+                    self.sel.clear();
                     self.cursor = Some(c);
                     self.reveal(c, center);
                     cx.notify();
@@ -441,6 +453,11 @@ impl GraphView {
             col: self.caret_col as u32 + 1,
             block: Some(b),
             token: self.token(),
+            operand: self
+                .blocks
+                .get(b)
+                .and_then(|k| k.lines.get(l))
+                .and_then(|(_, line)| crate::operands::operand_at(&line.text, self.caret_col)),
         };
         self.session.update(cx, |s, cx| s.set_caret(caret, cx));
     }
@@ -475,6 +492,13 @@ impl GraphView {
         }
         match self.hit(ev.position) {
             Some((b, l, col)) => {
+                if ev.modifiers.shift && self.cursor.is_some_and(|(cb, _)| cb == b) {
+                    self.sel_block = b;
+                    self.sel.begin(self.cursor.map_or(l, |(_, cl)| cl));
+                } else {
+                    self.sel.clear();
+                    self.drag_sel = Some((b, l));
+                }
                 self.cursor = Some((b, l));
                 self.caret_col = col;
                 self.highlight = self.token().map(Into::into);
@@ -496,6 +520,25 @@ impl GraphView {
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some((sb, sl)) = self.drag_sel {
+            if ev.pressed_button != Some(MouseButton::Left) {
+                self.drag_sel = None;
+            } else if let Some((b, l, col)) = self.hit(ev.position)
+                && b == sb
+                && self.cursor != Some((b, l))
+            {
+                self.sel_block = b;
+                self.sel.begin(sl);
+                self.cursor = Some((b, l));
+                self.caret_col = col;
+                if let Some(ea) = self.cursor_ea() {
+                    self.session
+                        .update(cx, |s, cx| s.set_cursor(ea, Origin::Graph, cx));
+                }
+                self.publish_caret(cx);
+                cx.notify();
+            }
+        }
         if let Some((start, pan)) = self.drag {
             if ev.pressed_button != Some(MouseButton::Left) {
                 self.drag = None;
@@ -508,6 +551,7 @@ impl GraphView {
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.drag = None;
+        self.drag_sel = None;
     }
 
     fn on_scroll(&mut self, ev: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -555,7 +599,122 @@ impl GraphView {
         }
     }
 
+    /// The selected lines of the caret's block, if any.
+    fn selection(&self) -> Option<(usize, std::ops::RangeInclusive<usize>)> {
+        let (b, l) = self.cursor?;
+        (b == self.sel_block)
+            .then(|| self.sel.range(l))
+            .flatten()
+            .map(|r| (b, r))
+    }
+
+    /// Shift+arrow, PageUp / PageDown, Home / End: extends the selection
+    /// within the block under the caret (`delta` lines, saturating).
+    fn extend(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some((b, l)) = self.cursor else { return };
+        let Some(block) = self.blocks.get(b) else {
+            return;
+        };
+        if self.sel_block != b {
+            self.sel.clear();
+        }
+        self.sel_block = b;
+        self.sel.begin(l);
+        let to = (l as isize + delta).clamp(0, block.lines.len() as isize - 1) as usize;
+        let ea = block.lines[to].0;
+        self.cursor = Some((b, to));
+        self.caret_col = 0;
+        self.reveal((b, to), false);
+        self.session
+            .update(cx, |s, cx| s.set_cursor(ea, Origin::Graph, cx));
+        self.publish_caret(cx);
+        cx.notify();
+    }
+
+    /// Where a keyboard-opened context menu appears: under the caret line.
+    fn caret_position(&self) -> Point<Pixels> {
+        let (Some(b), Some((bi, li))) = (self.bounds, self.cursor) else {
+            return point(px(200.), px(200.));
+        };
+        match self.layout.nodes.get(bi) {
+            Some(r) => {
+                b.origin
+                    + point(
+                        self.pan.x
+                            + px((r.x + PAD + self.caret_col as f32 * self.char_w) * self.zoom),
+                        self.pan.y + px((r.y + HEAD + PAD + (li as f32 + 1.) * lh()) * self.zoom),
+                    )
+            }
+            None => point(px(200.), px(200.)),
+        }
+    }
+
+    fn open_context_menu(&mut self, pos: Point<Pixels>, keyboard: bool, cx: &mut Context<Self>) {
+        let Some(ea) = self.cursor_ea() else { return };
+        let title = self.token().unwrap_or_else(|| format!("{ea:X}"));
+        let entries = crate::context_menu::listing(&self.session.read(cx).ops(), cx);
+        crate::context_menu::show(&self.session, pos, title, entries, keyboard, cx);
+    }
+
+    /// Right click on a line: the caret goes there first (unless it is inside
+    /// the selection), then the menu opens.
+    fn on_right_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        let Some((b, l, col)) = self.hit(ev.position) else {
+            return;
+        };
+        let inside = self
+            .selection()
+            .is_some_and(|(sb, r)| sb == b && r.contains(&l));
+        if !inside {
+            self.sel.clear();
+            self.cursor = Some((b, l));
+            self.caret_col = col;
+            self.highlight = self.token().map(Into::into);
+            if let Some(ea) = self.cursor_ea() {
+                self.session
+                    .update(cx, |s, cx| s.set_cursor(ea, Origin::Graph, cx));
+            }
+            self.publish_caret(cx);
+        }
+        self.open_context_menu(ev.position, false, cx);
+        cx.notify();
+    }
+
+    /// Esc: with a selection it only clears the selection; otherwise it is
+    /// "back" as everywhere (the action keeps travelling up).
+    fn on_back(&mut self, cx: &mut Context<Self>) {
+        if self.selection().is_some() {
+            self.sel.clear();
+            cx.notify();
+        } else {
+            cx.propagate();
+        }
+    }
+
+    /// Ctrl+C: the selected lines, or the current one.
+    fn copy(&mut self, with_addresses: bool, cx: &mut Context<Self>) {
+        let Some((b, l)) = self.cursor else { return };
+        let Some(block) = self.blocks.get(b) else {
+            return;
+        };
+        let range = self.selection().map_or(l..=l, |(_, r)| r);
+        let last = (*range.end()).min(block.lines.len().saturating_sub(1));
+        let rows = &block.lines[(*range.start()).min(last)..=last];
+        let addrs: Vec<String> = rows.iter().map(|(ea, _)| format!("{ea:X}")).collect();
+        let lines: Vec<CopyLine> = rows
+            .iter()
+            .zip(&addrs)
+            .map(|((_, line), a)| CopyLine {
+                addr: Some(a),
+                text: &line.text,
+            })
+            .collect();
+        zui_editor::clipboard::write(lines_text(&lines, with_addresses), cx);
+    }
+
     fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        self.sel.clear();
         // Walk lines in block order, then address order.
         let mut flat: Vec<(usize, usize, Ea)> = Vec::new();
         for (bi, b) in self.blocks.iter().enumerate() {
@@ -706,6 +865,7 @@ impl GraphView {
                 let kinds = v.edge_kinds.clone();
                 let marks = code::DebugMarks::read(v.session.read(cx));
                 let cursor = v.cursor;
+                let selected = v.selection();
                 let highlight = v.highlight.clone();
                 let focused = v.focus.is_focused(window);
                 let show_minimap = v.show_minimap;
@@ -830,7 +990,19 @@ impl GraphView {
                                 &theme,
                                 window,
                             );
-                            if marked.is_none() && cursor == Some((bi, li)) {
+                            let in_selection = selected
+                                .as_ref()
+                                .is_some_and(|(sb, r)| *sb == bi && r.contains(&li));
+                            if in_selection && marked.is_none() {
+                                window.paint_quad(gpui::fill(
+                                    Bounds::new(
+                                        point(origin.x + px(1.), y),
+                                        size(rect.size.width - px(2.), px(line_h)),
+                                    ),
+                                    hsla(theme.selection),
+                                ));
+                            }
+                            if marked.is_none() && !in_selection && cursor == Some((bi, li)) {
                                 window.paint_quad(gpui::fill(
                                     Bounds::new(
                                         point(origin.x + px(1.), y),
@@ -1057,6 +1229,19 @@ impl Render for GraphView {
                     commands::show_xrefs(&v.session, ea, false, cx);
                 }
             }))
+            .on_action(cx.listener(|v, _: &ShowContextMenu, _, cx| {
+                let pos = v.caret_position();
+                v.open_context_menu(pos, true, cx)
+            }))
+            .on_action(cx.listener(|v, _: &Back, _, cx| v.on_back(cx)))
+            .on_action(cx.listener(|v, _: &Copy, _, cx| v.copy(false, cx)))
+            .on_action(cx.listener(|v, _: &CopyWithAddresses, _, cx| v.copy(true, cx)))
+            .on_action(cx.listener(|v, _: &ExtendUp, _, cx| v.extend(-1, cx)))
+            .on_action(cx.listener(|v, _: &ExtendDown, _, cx| v.extend(1, cx)))
+            .on_action(cx.listener(|v, _: &ExtendPageUp, _, cx| v.extend(-20, cx)))
+            .on_action(cx.listener(|v, _: &ExtendPageDown, _, cx| v.extend(20, cx)))
+            .on_action(cx.listener(|v, _: &ExtendHome, _, cx| v.extend(-(1 << 20), cx)))
+            .on_action(cx.listener(|v, _: &ExtendEnd, _, cx| v.extend(1 << 20, cx)))
             .on_action(cx.listener(|v, _: &MakeCode, _, cx| v.edit(EditKind::Code, cx)))
             .on_action(cx.listener(|v, _: &MakeData, _, cx| v.edit(EditKind::Data, cx)))
             .on_action(cx.listener(|v, _: &Undefine, _, cx| v.edit(EditKind::Undefine, cx)))
@@ -1074,6 +1259,7 @@ impl Render for GraphView {
                     .overflow_hidden()
                     .on_scroll_wheel(cx.listener(Self::on_scroll))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))

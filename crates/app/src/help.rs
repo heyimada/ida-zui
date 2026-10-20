@@ -204,6 +204,26 @@ pub const COMING_FROM_IDA: &[(&str, &str, &str)] = &[
         "same",
     ),
     (
+        "Operand: hex/decimal, char, binary, offset, struct offset, enum, stack variable",
+        "H R B O T M K",
+        "same (negate _, bitwise not ~; Edit > Operand types)",
+    ),
+    (
+        "Array / string type / edit function",
+        "* / Alt+A / Alt+P",
+        "same",
+    ),
+    (
+        "Select lines, copy",
+        "Shift+arrows, Ctrl+C",
+        "Shift+arrows, Shift+click, drag, Ctrl+C (Esc clears)",
+    ),
+    (
+        "Context menu",
+        "right click",
+        "right click, Menu key or Ctrl+Alt+M",
+    ),
+    (
         "Save database",
         "Ctrl+W",
         "Ctrl+W (Ctrl+S too); close database is Ctrl+Shift+W",

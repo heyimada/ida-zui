@@ -14,7 +14,9 @@
 //   marker <name>        appends <name> to <file>.done
 //   clipboard <text>     seeds the in-process clipboard (the system one is never used)
 //   (open_url: Help > Documentation and Report an issue append `url: <url>` to <file>.done instead of opening a browser)
-//   clipdump             appends the in-process clipboard to <file>.done as `clipboard: <text>`
+//   clipdump             appends the in-process clipboard to <file>.done as `clipboard: <text>` (newlines as \\n)
+//   rightclick <x> <y>   a right click; shiftclick <x> <y> a left click with Shift held
+//   drag <x1> <y1> <x2> <y2>  press, move with the button held, release
 use gpui::{
     AnyWindowHandle, App, AppContext, ExternalPaths, FileDropEvent, Keystroke, Modifiers,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
@@ -149,8 +151,16 @@ fn run(line: &str, channel: &std::path::Path, window: &mut Window, cx: &mut App)
             );
             true
         }),
-        "click" | "dblclick" => xy().is_some_and(|position| {
-            let modifiers = Modifiers::default();
+        "click" | "dblclick" | "shiftclick" | "rightclick" => xy().is_some_and(|position| {
+            let modifiers = Modifiers {
+                shift: cmd == "shiftclick",
+                ..Default::default()
+            };
+            let button = if cmd == "rightclick" {
+                MouseButton::Right
+            } else {
+                MouseButton::Left
+            };
             window.dispatch_event(
                 PlatformInput::MouseMove(MouseMoveEvent {
                     position,
@@ -163,7 +173,7 @@ fn run(line: &str, channel: &std::path::Path, window: &mut Window, cx: &mut App)
             for click_count in 1..=clicks {
                 window.dispatch_event(
                     PlatformInput::MouseDown(MouseDownEvent {
-                        button: MouseButton::Left,
+                        button,
                         position,
                         modifiers,
                         click_count,
@@ -173,7 +183,7 @@ fn run(line: &str, channel: &std::path::Path, window: &mut Window, cx: &mut App)
                 );
                 window.dispatch_event(
                     PlatformInput::MouseUp(MouseUpEvent {
-                        button: MouseButton::Left,
+                        button,
                         position,
                         modifiers,
                         click_count,
@@ -183,6 +193,51 @@ fn run(line: &str, channel: &std::path::Path, window: &mut Window, cx: &mut App)
             }
             true
         }),
+        // Press at (x1, y1), move to (x2, y2) with the button held, release.
+        "drag" => {
+            let n: Vec<f32> = arg
+                .split_whitespace()
+                .filter_map(|v| v.parse().ok())
+                .collect();
+            let [x1, y1, x2, y2] = n[..] else {
+                return false;
+            };
+            let (from, to) = (point(px(x1), px(y1)), point(px(x2), px(y2)));
+            let modifiers = Modifiers::default();
+            let moved = |position, pressed_button| {
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position,
+                    pressed_button,
+                    modifiers,
+                })
+            };
+            window.dispatch_event(moved(from, None), cx);
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: from,
+                    modifiers,
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            for step in 1..=4 {
+                let t = step as f32 / 4.;
+                let at = point(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+                window.dispatch_event(moved(at, Some(MouseButton::Left)), cx);
+            }
+            window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: to,
+                    modifiers,
+                    click_count: 1,
+                }),
+                cx,
+            );
+            true
+        }
         "drop" => {
             let paths = ExternalPaths(
                 arg.split('|')
@@ -216,6 +271,9 @@ fn run(line: &str, channel: &std::path::Path, window: &mut Window, cx: &mut App)
         }
         "clipdump" => {
             let text = zui_editor::clipboard::read(cx).unwrap_or_default();
+            // One line: newlines are written as `\n` (and `\r`) so a
+            // multi-line copy can be compared exactly by the capture script.
+            let text = text.replace('\r', "\\r").replace('\n', "\\n");
             append_done(channel, &format!("clipboard: {text}"))
         }
         "marker" => append_done(channel, arg.trim()),

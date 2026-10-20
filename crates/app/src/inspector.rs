@@ -189,6 +189,19 @@ impl Inspector {
         self.session.update(cx, |s, cx| s.navigate(ea, cx));
     }
 
+    /// Right click on a row that stands for an address.
+    fn row_menu(
+        &mut self,
+        ea: Ea,
+        name: Option<String>,
+        pos: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let entries = crate::context_menu::address_row(&self.session, ea, name.clone(), cx);
+        let title = name.unwrap_or_else(|| format!("{ea:X}"));
+        crate::context_menu::show(&self.session, pos, title, entries, false, cx);
+    }
+
     /// A key/value row: the key in a 96 px column, the value beside it.
     fn kv(key: &str, value: impl IntoElement, theme: &Theme) -> gpui::Div {
         div()
@@ -306,6 +319,12 @@ impl Inspector {
                     .text_size(px(12.))
                     .hover(move |d| d.bg(hsla(t.hover)))
                     .on_click(cx.listener(move |v, _, _, cx| v.go(from, cx)))
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
+                            v.row_menu(from, None, ev.position, cx)
+                        }),
+                    )
                     .child(ui::xref_badge(&x.kind, &t))
                     .child(
                         div()
@@ -418,6 +437,7 @@ impl Inspector {
             .child(div().px(px(8.)).pb(px(8.)).flex().flex_col().children(
                 f.callees.iter().take(40).enumerate().map(|(i, c)| {
                     let ea = c.ea;
+                    let callee = c.name.clone();
                     div()
                         .id(("callee", i))
                         .h(px(24.))
@@ -430,6 +450,12 @@ impl Inspector {
                         .text_size(px(12.))
                         .hover(move |d| d.bg(hsla(t.hover)))
                         .on_click(cx.listener(move |v, _, _, cx| v.go(ea, cx)))
+                        .on_mouse_down(
+                            gpui::MouseButton::Right,
+                            cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
+                                v.row_menu(ea, Some(callee.clone()), ev.position, cx)
+                            }),
+                        )
                         .child(
                             div()
                                 .flex_1()
@@ -553,6 +579,12 @@ impl Inspector {
                             .text_size(px(12.))
                             .hover(move |d| d.bg(hsla(t.hover)))
                             .on_click(cx.listener(move |v, _, _, cx| v.go(ea, cx)))
+                            .on_mouse_down(
+                                gpui::MouseButton::Right,
+                                cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
+                                    v.row_menu(ea, None, ev.position, cx)
+                                }),
+                            )
                             .child(flow_badge(*k))
                             .child(div().flex_1().child(format!("Block #{idx}")))
                             .child(
@@ -651,6 +683,12 @@ impl Inspector {
                         .text_color(hsla(t.syntax.code_name))
                         .hover(move |d| d.bg(hsla(t.hover)))
                         .on_click(cx.listener(move |v, _, _, cx| v.go(ea, cx)))
+                        .on_mouse_down(
+                            gpui::MouseButton::Right,
+                            cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
+                                v.row_menu(ea, None, ev.position, cx)
+                            }),
+                        )
                         .child(
                             div()
                                 .flex_1()

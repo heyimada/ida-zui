@@ -6,8 +6,8 @@
 use crate::session::{Session, SessionEvent};
 use gpui::{Context, Entity, EventEmitter, SharedString, Subscription};
 use ida_proto::{
-    AddrInfo, AddrInfoReply, Ea, FuncSummary, FuncSummaryReply, GetComment, GetType, Resolve,
-    XrefRow, XrefsTo,
+    AddrInfo, AddrInfoReply, Ea, FuncSummary, FuncSummaryReply, GetComment, GetOpRepr, GetType,
+    Resolve, XrefRow, XrefsTo,
 };
 use std::time::Duration;
 
@@ -119,6 +119,7 @@ impl Focus {
             ea: cursor,
             repeatable: true,
         });
+        let ops = s.call(GetOpRepr { ea: cursor });
         let session2 = session.clone();
         cx.spawn(async move |this, cx| {
             let addr = addr.await.ok();
@@ -129,6 +130,7 @@ impl Focus {
             };
             let comment = comment.await.unwrap_or_default();
             let rpt = rpt.await.unwrap_or_default();
+            let ops = ops.await.unwrap_or_default();
             // The target of the live xrefs: the resolved name, else the item under the caret.
             let target = resolved
                 .or_else(|| addr.as_ref().map(|a| a.head))
@@ -173,6 +175,9 @@ impl Focus {
                 f.comment = comment;
                 f.repeatable_comment = rpt;
                 f.type_text = type_text;
+                if let Some(session) = f.session.clone() {
+                    session.update(cx, |s, _| s.op_repr = ops);
+                }
                 cx.emit(FocusEvent::Updated);
                 cx.notify();
             })

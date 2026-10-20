@@ -389,6 +389,13 @@ impl BottomPanel {
                         }
                         cx.notify();
                     }))
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
+                            v.selected = Some(i);
+                            v.row_menu(target.unwrap_or(0), ev.position, cx);
+                        }),
+                    )
                     .child(table::cell(&COLS[0]).text_color(hsla(t.muted)).child(addr))
                     .child(table::cell(&COLS[1]).child(match w.value {
                         Some(v) => format!("{v:016X}"),
@@ -580,6 +587,13 @@ impl BottomPanel {
                         v.session.update(cx, |s, cx| s.navigate(ea, cx));
                         cx.notify();
                     }))
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
+                            v.selected = Some(i);
+                            v.row_menu(ea, ev.position, cx);
+                        }),
+                    )
                     .child(
                         table::cell(&COLS[0])
                             .text_color(hsla(t.muted))
@@ -715,6 +729,13 @@ impl BottomPanel {
                         }
                         cx.notify();
                     }))
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
+                            v.selected = Some(i);
+                            v.row_menu(base, ev.position, cx);
+                        }),
+                    )
                     .child(
                         table::cell(&COLS[0])
                             .text_color(hsla(t.syntax.num))
@@ -773,6 +794,13 @@ impl BottomPanel {
                         }
                         cx.notify();
                     }))
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
+                            v.selected = Some(i);
+                            v.row_menu(ea, ev.position, cx);
+                        }),
+                    )
                     .child(
                         table::cell(&COLS[0]).child(
                             div()

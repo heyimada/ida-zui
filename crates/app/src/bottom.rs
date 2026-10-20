@@ -138,6 +138,22 @@ const COLS: [(&str, Option<f32>); 4] = [
 ];
 
 impl BottomPanel {
+    /// Right click on a row that stands for an address.
+    pub(crate) fn row_menu(
+        &mut self,
+        ea: ida_proto::Ea,
+        pos: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        // 0: a row with no address of its own (a stack word that is no pointer).
+        if ea == 0 {
+            return;
+        }
+        let entries = crate::context_menu::address_row(&self.session, ea, None, cx);
+        crate::context_menu::show(&self.session, pos, format!("{ea:X}"), entries, false, cx);
+        cx.notify();
+    }
+
     /// The chevron behind which the tabs that do not fit wait.
     fn tab_overflow(
         &self,
@@ -312,6 +328,13 @@ impl BottomPanel {
                                         v.session.update(cx, |s, cx| s.navigate(from, cx));
                                         cx.notify();
                                     }))
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Right,
+                                        cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
+                                            v.selected = Some(i);
+                                            v.row_menu(from, ev.position, cx);
+                                        }),
+                                    )
                                     .child(cell(COLS[0].1).child(ui::xref_badge(&x.kind, &t)))
                                     .child(
                                         cell(COLS[1].1)

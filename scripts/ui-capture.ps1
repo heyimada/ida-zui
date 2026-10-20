@@ -14,10 +14,13 @@
 #   move:<x>,<y>       mouse move, logical window pixels (content area)
 #   click:<x>,<y>      move + left click, same coordinates
 #   dblclick:<x>,<y>   click twice, the second with click count 2
+#   shiftclick:<x>,<y> click with Shift held; rightclick:<x>,<y> a right click
+#   drag:<x1>,<y1>,<x2>,<y2>  press at the first point, move with the button held, release at the second
 #   confirm:<n>        answer button n (1-based) of an in-app question
 #   drop:<path>[|<path>]  simulate files dropped on the window (in-process, via gpui's file-drop events)
 #   clipboard:<text>   seed the app's in-process clipboard (the system clipboard is never touched)
-#   clipdump           print the in-process clipboard (and log it)
+#   clipdump           print the in-process clipboard (and log it; newlines show as \n)
+#   clipassert:<text>  like clipdump, then compare with <text> (write newlines as \n); a mismatch fails the script
 #   marker:<name>      wait until the app has executed everything queued so far
 #   shot:<name>        save the window as artifacts/ui/<name>.png
 #   close              post WM_CLOSE (no focus change), waitexit:<ms>, files:<glob>
@@ -161,6 +164,21 @@ try {
             "move" { Send ("move " + ($arg -replace ",", " ")) }
             "click" { Send ("click " + ($arg -replace ",", " ")) }
             "dblclick" { Send ("dblclick " + ($arg -replace ",", " ")) }
+            "shiftclick" { Send ("shiftclick " + ($arg -replace ",", " ")) }
+            "rightclick" { Send ("rightclick " + ($arg -replace ",", " ")) }
+            "drag" { Send ("drag " + ($arg -replace ",", " ")) }
+            "clipassert" {
+                $syncName = "clipassert-" + [guid]::NewGuid().ToString("N")
+                Send "clipdump"
+                Send "marker $syncName"
+                $done = Join-Path $work "automation.txt.done"
+                $until = (Get-Date).AddSeconds(30)
+                while ((Get-Date) -lt $until -and -not ((Test-Path $done) -and ((Get-Content $done) -contains $syncName))) { Start-Sleep -Milliseconds 100 }
+                $line = Get-Content $done | Where-Object { $_ -like "clipboard:*" } | Select-Object -Last 1
+                $got = if ($line) { $line.Substring("clipboard: ".Length) } else { "<none>" }
+                if ($got -ceq $arg) { Note "PASS clipassert: $got" }
+                else { Note "FAIL clipassert: expected [$arg] got [$got]"; $failed = $true }
+            }
             "clipboard" { Send "clipboard $arg" }
             "drop" { Send "drop $arg" }
             "clipdump" {
