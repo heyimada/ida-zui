@@ -230,11 +230,14 @@ impl Workspace {
                         }),
                     )
                     .child(
+                        // Same path as the OS close: unsaved databases are asked about first.
                         control("Close", "close", WindowControlArea::Close).on_click(
-                            |_, window, cx| {
+                            cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
-                                window.remove_window();
-                            },
+                                if this.should_close(window, cx) {
+                                    window.remove_window();
+                                }
+                            }),
                         ),
                     ),
             )

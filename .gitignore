@@ -1,4 +1,5 @@
 /target
+/target-lead
 # Licensed Hex-Rays SDK: extract it here locally, never commit it.
 /third_party/
 # IDA writes databases next to inputs.
